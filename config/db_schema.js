@@ -27,6 +27,27 @@ async function createLeadSchema() {
   console.log('Lead schema created successfully.');
 }
 
+async function createLeadActivitySchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lead_activities (
+      id SERIAL PRIMARY KEY,
+      lead_id INTEGER NOT NULL,
+      activity_type VARCHAR(20) NOT NULL DEFAULT 'note'
+        CHECK (activity_type IN ('note', 'call', 'whatsapp', 'system')),
+      content TEXT NOT NULL,
+      actor_name VARCHAR(255) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS lead_activities_lead_id_idx
+    ON lead_activities (lead_id, created_at DESC);
+  `);
+
+  console.log('Lead activity schema created successfully.');
+}
+
 async function createCustomerSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -119,6 +140,45 @@ async function createQuotationSchema() {
   console.log('Quotation schema created successfully.');
 }
 
+async function createMeetingSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meetings (
+      id SERIAL PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      description TEXT,
+      meeting_type VARCHAR(30) NOT NULL DEFAULT 'Meeting',
+      start_at TIMESTAMPTZ NOT NULL,
+      end_at TIMESTAMPTZ NOT NULL,
+      all_day BOOLEAN NOT NULL DEFAULT FALSE,
+      status VARCHAR(20) NOT NULL DEFAULT 'Scheduled'
+        CHECK (status IN ('Scheduled', 'Completed', 'Cancelled')),
+      owner_name VARCHAR(255) NOT NULL,
+      location VARCHAR(255),
+      lead_id INTEGER,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT meetings_time_range_check CHECK (end_at > start_at)
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS meetings_start_at_idx
+    ON meetings (start_at);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS meetings_owner_name_idx
+    ON meetings (owner_name);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS meetings_lead_id_idx
+    ON meetings (lead_id);
+  `);
+
+  console.log('Meeting schema created successfully.');
+}
+
 async function createSchemas() {
   try {
     await createLeadSchema();
@@ -128,8 +188,10 @@ async function createSchemas() {
     if (error.code !== '42501') throw error;
     console.warn('Skipping lead schema migration because the database role is not the leads table owner.');
   }
+  await createLeadActivitySchema();
   await createCustomerSchema();
   await createQuotationSchema();
+  await createMeetingSchema();
 }
 
-module.exports = { createLeadSchema, createCustomerSchema, createQuotationSchema, createSchemas };
+module.exports = { createLeadSchema, createLeadActivitySchema, createCustomerSchema, createQuotationSchema, createMeetingSchema, createSchemas };

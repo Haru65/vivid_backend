@@ -2,6 +2,7 @@ const express = require('express');
 const leadRouter = require('./routes/lead_dashboard');
 const customerRouter = require('./routes/customers');
 const quotationRouter = require('./routes/quotations');
+const meetingRouter = require('./routes/meetings');
 const { createSchemas } = require('./config/db_schema');
 
 
@@ -15,7 +16,7 @@ app.use((req, res, next) => {
   const origin = req.headers.origin || '';
   const localOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   if (localOrigin) res.header('Access-Control-Allow-Origin', origin);
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, X-User-Name, X-User-Role');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -27,6 +28,7 @@ app.use(express.json());
 app.use('/leads', leadRouter);
 app.use('/customers', customerRouter);
 app.use('/quotations', quotationRouter);
+app.use('/meetings', meetingRouter);
 
 async function startServer() {
   try {

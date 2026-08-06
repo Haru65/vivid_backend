@@ -1,6 +1,8 @@
 const express = require('express');
 const {
   retrieveLeads,
+  retrieveLeadActivities,
+  createLeadActivity,
   createLead,
   updateLead,
   deleteLead,
@@ -9,12 +11,43 @@ const {
 
 const router = express.Router();
 
+function currentUser(req) {
+  const role = String(req.get('x-user-role') || 'admin').toLowerCase() === 'salesperson'
+    ? 'salesperson'
+    : 'admin';
+  return {
+    role,
+    name: String(req.get('x-user-name') || 'Ashish Vibhute').trim() || 'Ashish Vibhute',
+  };
+}
+
+function handleActivityError(res, message, error) {
+  console.error(`${message}:`, error);
+  res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : message });
+}
+
 router.get('/', async (req, res) => {
   try {
     res.json(await retrieveLeads());
   } catch (error) {
     console.error('Error retrieving leads:', error);
     res.status(500).json({ error: 'Unable to retrieve leads' });
+  }
+});
+
+router.get('/:leadId/activities', async (req, res) => {
+  try {
+    res.json(await retrieveLeadActivities(req.params.leadId));
+  } catch (error) {
+    handleActivityError(res, 'Unable to retrieve lead activity', error);
+  }
+});
+
+router.post('/:leadId/activities', async (req, res) => {
+  try {
+    res.status(201).json(await createLeadActivity(req.params.leadId, req.body, currentUser(req)));
+  } catch (error) {
+    handleActivityError(res, 'Unable to create lead activity', error);
   }
 });
 
