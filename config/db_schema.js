@@ -33,11 +33,22 @@ async function createLeadActivitySchema() {
       id SERIAL PRIMARY KEY,
       lead_id INTEGER NOT NULL,
       activity_type VARCHAR(20) NOT NULL DEFAULT 'note'
-        CHECK (activity_type IN ('note', 'call', 'whatsapp', 'system')),
+        CHECK (activity_type IN ('note', 'call', 'whatsapp', 'system', 'email', 'meeting')),
       content TEXT NOT NULL,
       actor_name VARCHAR(255) NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE lead_activities
+    DROP CONSTRAINT IF EXISTS lead_activities_activity_type_check;
+  `);
+
+  await pool.query(`
+    ALTER TABLE lead_activities
+    ADD CONSTRAINT lead_activities_activity_type_check
+    CHECK (activity_type IN ('note', 'call', 'whatsapp', 'system', 'email', 'meeting'));
   `);
 
   await pool.query(`
@@ -119,12 +130,45 @@ async function createQuotationSchema() {
       total_amount NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
       valid_until DATE,
       status VARCHAR(20) NOT NULL DEFAULT 'Draft'
-        CHECK (status IN ('Draft', 'Sent', 'Approved', 'Rejected')),
+        CHECK (status IN ('Draft', 'Sent', 'Approved', 'Rejected', 'Superseded')),
       sent_at TIMESTAMP,
       notes TEXT,
+      revision_group_id INTEGER,
+      revision_number INTEGER NOT NULL DEFAULT 0 CHECK (revision_number >= 0),
+      parent_quotation_id INTEGER,
+      is_current_revision BOOLEAN NOT NULL DEFAULT TRUE,
+      revision_reason TEXT,
+      negotiation_notes TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE quotations
+    ADD COLUMN IF NOT EXISTS revision_group_id INTEGER,
+    ADD COLUMN IF NOT EXISTS revision_number INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS parent_quotation_id INTEGER,
+    ADD COLUMN IF NOT EXISTS is_current_revision BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS revision_reason TEXT,
+    ADD COLUMN IF NOT EXISTS negotiation_notes TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE quotations
+    DROP CONSTRAINT IF EXISTS quotations_status_check;
+  `);
+
+  await pool.query(`
+    ALTER TABLE quotations
+    ADD CONSTRAINT quotations_status_check
+    CHECK (status IN ('Draft', 'Sent', 'Approved', 'Rejected', 'Superseded'));
+  `);
+
+  await pool.query(`
+    UPDATE quotations
+    SET revision_group_id = id
+    WHERE revision_group_id IS NULL;
   `);
 
   await pool.query(`
@@ -135,6 +179,11 @@ async function createQuotationSchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS quotations_status_idx
     ON quotations (status);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS quotations_revision_group_idx
+    ON quotations (revision_group_id, revision_number DESC);
   `);
 
   console.log('Quotation schema created successfully.');

@@ -10,6 +10,16 @@ const {
 
 const router = express.Router();
 
+function currentUser(req) {
+  const role = String(req.get('x-user-role') || 'admin').toLowerCase() === 'salesperson'
+    ? 'salesperson'
+    : 'admin';
+  return {
+    role,
+    name: String(req.get('x-user-name') || 'Ashish Vibhute').trim() || 'Ashish Vibhute',
+  };
+}
+
 function handleError(res, message, error) {
   console.error(`${message}:`, error);
   res.status(error.statusCode || (error.code === '23505' ? 409 : 500)).json({
@@ -65,7 +75,7 @@ router.post('/renew-amc/:id', async (req, res) => {
 
 router.post('/from-lead/:leadId', async (req, res) => {
   try {
-    const result = await convertLeadToCustomer(req.params.leadId);
+    const result = await convertLeadToCustomer(req.params.leadId, currentUser(req));
     res.status(result.created ? 201 : 200).json({
       ...result.customer,
       created: result.created,

@@ -37,7 +37,7 @@ router.get('/', async (req, res) => {
 
 router.get('/:leadId/activities', async (req, res) => {
   try {
-    res.json(await retrieveLeadActivities(req.params.leadId));
+    res.json(await retrieveLeadActivities(req.params.leadId, currentUser(req)));
   } catch (error) {
     handleActivityError(res, 'Unable to retrieve lead activity', error);
   }
@@ -53,7 +53,7 @@ router.post('/:leadId/activities', async (req, res) => {
 
 router.post('/create-lead', async (req, res) => {
   try {
-    res.status(201).json(await createLead(req.body));
+    res.status(201).json(await createLead(req.body, currentUser(req)));
   } catch (error) {
     console.error('Error creating lead:', error);
     res.status(500).json({ error: 'Unable to create lead' });
@@ -62,7 +62,7 @@ router.post('/create-lead', async (req, res) => {
 
 router.put('/update-lead/:id', async (req, res) => {
   try {
-    const lead = await updateLead(req.params.id, req.body);
+    const lead = await updateLead(req.params.id, req.body, currentUser(req));
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     res.json(lead);
   } catch (error) {
@@ -84,7 +84,7 @@ router.delete('/delete-lead/:id', async (req, res) => {
 
 router.post('/accept-proposal/:id', async (req, res) => {
   try {
-    const lead = await acceptProposal(req.params.id, req.body.quotation);
+    const lead = await acceptProposal(req.params.id, req.body.quotation, currentUser(req));
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     res.json({
       ...lead,

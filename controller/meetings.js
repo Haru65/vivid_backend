@@ -1,4 +1,5 @@
 const pool = require('../config/db_connection');
+const { logLeadActivity } = require('./leads');
 
 const MEETING_COLUMNS = `
   m.id,
@@ -148,7 +149,14 @@ async function createMeeting(data, user) {
       values.allDay, values.status, values.ownerName, values.location, values.leadId],
   );
 
-  return retrieveMeeting(result.rows[0].id, user);
+  const meeting = await retrieveMeeting(result.rows[0].id, user);
+  if (meeting?.lead_id) {
+    await logLeadActivity(meeting.lead_id, {
+      activity_type: 'meeting',
+      content: `${meeting.meeting_type} scheduled: ${meeting.title}`,
+    }, user);
+  }
+  return meeting;
 }
 
 async function retrieveMeeting(id, user) {
@@ -192,7 +200,27 @@ async function updateMeeting(id, data, user) {
     [values.title, values.description, values.meetingType, values.startAt, values.endAt,
       values.allDay, values.status, values.ownerName, values.location, values.leadId, id],
   );
-  return retrieveMeeting(result.rows[0].id, user);
+  const meeting = await retrieveMeeting(result.rows[0].id, user);
+  if (meeting?.lead_id) {
+    const statusChanged = existing.status !== meeting.status;
+    const timeChanged = String(existing.start_at) !== String(meeting.start_at)
+      || String(existing.end_at) !== String(meeting.end_at);
+    await logLeadActivity(meeting.lead_id, {
+      activity_type: 'meeting',
+      content: statusChanged
+        ? `${meeting.meeting_type} ${meeting.status.toLowerCase()}: ${meeting.title}`
+        : timeChanged
+          ? `${meeting.meeting_type} rescheduled: ${meeting.title}`
+          : `${meeting.meeting_type} updated: ${meeting.title}`,
+    }, user);
+  }
+  if (existing.lead_id && String(existing.lead_id) !== String(meeting?.lead_id || '')) {
+    await logLeadActivity(existing.lead_id, {
+      activity_type: 'meeting',
+      content: `${existing.meeting_type} moved away from this lead: ${existing.title}`,
+    }, user);
+  }
+  return meeting;
 }
 
 async function deleteMeeting(id, user) {
@@ -204,6 +232,12 @@ async function deleteMeeting(id, user) {
     throw error;
   }
   const result = await pool.query('DELETE FROM meetings WHERE id = $1 RETURNING id', [id]);
+  if (result.rows[0] && existing.lead_id) {
+    await logLeadActivity(existing.lead_id, {
+      activity_type: 'meeting',
+      content: `${existing.meeting_type} deleted: ${existing.title}`,
+    }, user);
+  }
   return result.rows[0] || null;
 }
 

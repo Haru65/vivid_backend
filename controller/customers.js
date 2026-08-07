@@ -1,4 +1,5 @@
 const pool = require('../config/db_connection');
+const { logLeadActivity } = require('./leads');
 
 const CUSTOMER_COLUMNS = `
   id,
@@ -164,7 +165,7 @@ async function renewAmc(id) {
   return result.rows[0] || null;
 }
 
-async function convertLeadToCustomer(leadId) {
+async function convertLeadToCustomer(leadId, user) {
   const client = await pool.connect();
 
   try {
@@ -197,6 +198,10 @@ async function convertLeadToCustomer(leadId) {
 
     if (existingResult.rows[0]) {
       await client.query('COMMIT');
+      await logLeadActivity(lead.id, {
+        activity_type: 'system',
+        content: `Customer conversion checked; ${existingResult.rows[0].company_name} already exists`,
+      }, user);
       return { customer: existingResult.rows[0], created: false };
     }
 
@@ -219,6 +224,10 @@ async function convertLeadToCustomer(leadId) {
     );
 
     await client.query('COMMIT');
+    await logLeadActivity(lead.id, {
+      activity_type: 'system',
+      content: `Lead converted to customer account ${customerResult.rows[0].company_name}`,
+    }, user);
     return { customer: customerResult.rows[0], created: true };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
