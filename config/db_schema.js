@@ -59,6 +59,41 @@ async function createLeadActivitySchema() {
   console.log('Lead activity schema created successfully.');
 }
 
+async function createLeadFollowupSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lead_followups (
+      id SERIAL PRIMARY KEY,
+      lead_id INTEGER NOT NULL,
+      followup_type VARCHAR(30) NOT NULL DEFAULT 'General'
+        CHECK (followup_type IN ('Call', 'WhatsApp', 'Email', 'Meeting', 'Payment', 'Quotation', 'General')),
+      title VARCHAR(255) NOT NULL,
+      notes TEXT,
+      due_at TIMESTAMPTZ NOT NULL,
+      priority VARCHAR(20) NOT NULL DEFAULT 'Medium'
+        CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
+      status VARCHAR(20) NOT NULL DEFAULT 'Open'
+        CHECK (status IN ('Open', 'Completed', 'Cancelled')),
+      assigned_to VARCHAR(255),
+      completed_at TIMESTAMPTZ,
+      created_by VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS lead_followups_lead_due_idx
+    ON lead_followups (lead_id, due_at);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS lead_followups_status_due_idx
+    ON lead_followups (status, due_at);
+  `);
+
+  console.log('Lead followup schema created successfully.');
+}
+
 async function createCustomerSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -238,9 +273,10 @@ async function createSchemas() {
     console.warn('Skipping lead schema migration because the database role is not the leads table owner.');
   }
   await createLeadActivitySchema();
+  await createLeadFollowupSchema();
   await createCustomerSchema();
   await createQuotationSchema();
   await createMeetingSchema();
 }
 
-module.exports = { createLeadSchema, createLeadActivitySchema, createCustomerSchema, createQuotationSchema, createMeetingSchema, createSchemas };
+module.exports = { createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createMeetingSchema, createSchemas };

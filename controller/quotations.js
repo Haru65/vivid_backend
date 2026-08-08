@@ -59,6 +59,14 @@ function nullableString(value, field, maxLength) {
   return result || null;
 }
 
+function nullablePhone(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  const digits = String(value).replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.length !== 10) throw validationError(`${field} must be exactly 10 digits.`);
+  return digits;
+}
+
 function positiveInteger(value, field) {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) throw validationError(`${field} must be a whole number greater than zero.`);
@@ -109,7 +117,7 @@ function normalizedValues(data) {
     companyName: requiredString(data.company_name, 'Company name', 255),
     contactPersonName: nullableString(data.contact_person_name, 'Contact person name', 255),
     contactPersonEmail: nullableString(data.contact_person_email, 'Contact person email', 255),
-    contactPersonPhone: nullableString(data.contact_person_phone, 'Contact person phone', 20),
+    contactPersonPhone: nullablePhone(data.contact_person_phone, 'Contact person phone'),
     billingName: requiredString(data.billing_name, 'Billing name', 255),
     billingAddress: requiredString(data.billing_address, 'Billing address', 5000),
     billingCity: nullableString(data.billing_city, 'Billing city', 255),
@@ -117,7 +125,7 @@ function normalizedValues(data) {
     billingPincode: nullableString(data.billing_pincode, 'Billing pincode', 20),
     billingGstin: nullableString(data.billing_gstin, 'Billing GSTIN', 20),
     billingEmail: nullableString(data.billing_email, 'Billing email', 255),
-    billingPhone: nullableString(data.billing_phone, 'Billing phone', 20),
+    billingPhone: nullablePhone(data.billing_phone, 'Billing phone'),
     lineItems,
     subtotal,
     gstRate,

@@ -41,6 +41,14 @@ function requiredString(value, field, maxLength) {
   return result;
 }
 
+function nullablePhone(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  const digits = String(value).replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.length !== 10) throw validationError(`${field} must be exactly 10 digits.`);
+  return digits;
+}
+
 function nonNegativeNumber(value, field, defaultValue = 0) {
   if (value === undefined || value === null || value === '') return defaultValue;
   const number = Number(value);
@@ -83,7 +91,7 @@ function customerValues(customerData) {
     nullableString(customerData.gstin, 'GSTIN', 20),
     nullableString(customerData.city, 'City', 255),
     nullableString(customerData.contact_person_name, 'Contact person name', 255),
-    nullableString(customerData.contact_person_phone, 'Contact person phone', 20),
+    nullablePhone(customerData.contact_person_phone, 'Contact person phone'),
     amcStatus,
     nonNegativeInteger(customerData.total_orders, 'Total orders'),
     nonNegativeNumber(customerData.lifetime_value, 'Lifetime value'),

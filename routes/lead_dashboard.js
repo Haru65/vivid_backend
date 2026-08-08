@@ -3,6 +3,11 @@ const {
   retrieveLeads,
   retrieveLeadActivities,
   createLeadActivity,
+  retrieveLeadFollowups,
+  createLeadFollowup,
+  updateLeadFollowup,
+  completeLeadFollowup,
+  cancelLeadFollowup,
   createLead,
   updateLead,
   deleteLead,
@@ -51,12 +56,57 @@ router.post('/:leadId/activities', async (req, res) => {
   }
 });
 
+router.get('/:leadId/followups', async (req, res) => {
+  try {
+    res.json(await retrieveLeadFollowups(req.params.leadId, currentUser(req)));
+  } catch (error) {
+    handleActivityError(res, 'Unable to retrieve lead follow-ups', error);
+  }
+});
+
+router.post('/:leadId/followups', async (req, res) => {
+  try {
+    res.status(201).json(await createLeadFollowup(req.params.leadId, req.body, currentUser(req)));
+  } catch (error) {
+    handleActivityError(res, 'Unable to create lead follow-up', error);
+  }
+});
+
+router.put('/:leadId/followups/:followupId', async (req, res) => {
+  try {
+    const followup = await updateLeadFollowup(req.params.leadId, req.params.followupId, req.body, currentUser(req));
+    if (!followup) return res.status(404).json({ error: 'Follow-up not found' });
+    res.json(followup);
+  } catch (error) {
+    handleActivityError(res, 'Unable to update lead follow-up', error);
+  }
+});
+
+router.post('/:leadId/followups/:followupId/complete', async (req, res) => {
+  try {
+    const followup = await completeLeadFollowup(req.params.leadId, req.params.followupId, currentUser(req));
+    if (!followup) return res.status(404).json({ error: 'Follow-up not found' });
+    res.json(followup);
+  } catch (error) {
+    handleActivityError(res, 'Unable to complete lead follow-up', error);
+  }
+});
+
+router.post('/:leadId/followups/:followupId/cancel', async (req, res) => {
+  try {
+    const followup = await cancelLeadFollowup(req.params.leadId, req.params.followupId, currentUser(req));
+    if (!followup) return res.status(404).json({ error: 'Follow-up not found' });
+    res.json(followup);
+  } catch (error) {
+    handleActivityError(res, 'Unable to cancel lead follow-up', error);
+  }
+});
+
 router.post('/create-lead', async (req, res) => {
   try {
     res.status(201).json(await createLead(req.body, currentUser(req)));
   } catch (error) {
-    console.error('Error creating lead:', error);
-    res.status(500).json({ error: 'Unable to create lead' });
+    handleActivityError(res, 'Unable to create lead', error);
   }
 });
 
@@ -66,8 +116,7 @@ router.put('/update-lead/:id', async (req, res) => {
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     res.json(lead);
   } catch (error) {
-    console.error('Error updating lead:', error);
-    res.status(500).json({ error: 'Unable to update lead' });
+    handleActivityError(res, 'Unable to update lead', error);
   }
 });
 
