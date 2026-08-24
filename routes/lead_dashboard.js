@@ -141,8 +141,7 @@ router.post('/accept-proposal/:id', async (req, res) => {
       message: 'Proposal accepted and quotation marked as sent',
     });
   } catch (error) {
-    console.error('Error accepting proposal:', error);
-    res.status(500).json({ error: 'Unable to accept proposal' });
+    handleActivityError(res, 'Unable to accept proposal', error);
   }
 });
 

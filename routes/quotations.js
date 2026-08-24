@@ -7,6 +7,11 @@ const {
   deleteQuotation,
   sendQuotation,
 } = require('../controller/quotations');
+const {
+  checkNegotiation,
+  createNegotiation,
+} = require('../services/negotiationService');
+const { checkHandoverEligibility } = require('../services/handoverService');
 
 const router = express.Router();
 
@@ -48,6 +53,33 @@ router.post('/:id/revisions', async (req, res) => {
     res.status(201).json(await createQuotationRevision(req.params.id, req.body, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to create quotation revision', error);
+  }
+});
+
+router.get('/:id/handover-eligibility', async (req, res) => {
+  try {
+    res.json(await checkHandoverEligibility({
+      quotationId: req.params.id,
+      user: currentUser(req),
+    }));
+  } catch (error) {
+    handleError(res, 'Unable to check handover eligibility', error);
+  }
+});
+
+router.post('/:quotationId/negotiations/check', async (req, res) => {
+  try {
+    res.json(await checkNegotiation(req.params.quotationId, req.body, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to check negotiation authority', error);
+  }
+});
+
+router.post('/:quotationId/negotiations', async (req, res) => {
+  try {
+    res.status(201).json(await createNegotiation(req.params.quotationId, req.body, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to create negotiation', error);
   }
 });
 

@@ -49,6 +49,16 @@ function nullablePhone(value, field) {
   return digits;
 }
 
+function nullableGstin(value, field) {
+  const gstin = nullableString(value, field, 15);
+  if (!gstin) return null;
+  const normalized = gstin.toUpperCase();
+  if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(normalized)) {
+    throw validationError(`${field} must be a valid 15-character GSTIN.`);
+  }
+  return normalized;
+}
+
 function nonNegativeNumber(value, field, defaultValue = 0) {
   if (value === undefined || value === null || value === '') return defaultValue;
   const number = Number(value);
@@ -88,7 +98,7 @@ function customerValues(customerData) {
 
   return [
     requiredString(customerData.company_name, 'Company name', 255),
-    nullableString(customerData.gstin, 'GSTIN', 20),
+    nullableGstin(customerData.gstin, 'GSTIN'),
     nullableString(customerData.city, 'City', 255),
     nullableString(customerData.contact_person_name, 'Contact person name', 255),
     nullablePhone(customerData.contact_person_phone, 'Contact person phone'),

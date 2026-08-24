@@ -22,6 +22,15 @@ const QUOTATION_COLUMNS = `
   gst_rate,
   gst_amount,
   total_amount,
+  discount_percent,
+  discount_amount,
+  final_price,
+  payment_terms,
+  delivery_days,
+  warranty_terms,
+  customer_po_number,
+  customer_po_date,
+  order_confirmed_at,
   valid_until,
   status,
   sent_at,
@@ -67,6 +76,30 @@ function nullablePhone(value, field) {
   return digits;
 }
 
+function nullableEmail(value, field) {
+  const result = nullableString(value, field, 255);
+  if (!result) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(result)) throw validationError(`${field} must be a valid email address.`);
+  return result;
+}
+
+function nullableGstin(value, field) {
+  const result = nullableString(value, field, 15);
+  if (!result) return null;
+  const normalized = result.toUpperCase();
+  if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(normalized)) {
+    throw validationError(`${field} must be a valid 15-character GSTIN.`);
+  }
+  return normalized;
+}
+
+function nullablePincode(value, field) {
+  const result = nullableString(value, field, 6);
+  if (!result) return null;
+  if (!/^\d{6}$/.test(result)) throw validationError(`${field} must be exactly 6 digits.`);
+  return result;
+}
+
 function positiveInteger(value, field) {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) throw validationError(`${field} must be a whole number greater than zero.`);
@@ -77,6 +110,18 @@ function nonNegativeNumber(value, field, defaultValue = 0) {
   if (value === undefined || value === null || value === '') return defaultValue;
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) throw validationError(`${field} must be zero or more.`);
+  return number;
+}
+
+function nullableNonNegativeNumber(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  return nonNegativeNumber(value, field);
+}
+
+function nullableInteger(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) throw validationError(`${field} must be a whole number of zero or more.`);
   return number;
 }
 
@@ -109,28 +154,41 @@ function normalizedValues(data) {
   const subtotal = Number(lineItems.reduce((sum, item) => sum + item.amount, 0).toFixed(2));
   const gstRate = nonNegativeNumber(data.gst_rate, 'GST rate', 18);
   if (gstRate > 100) throw validationError('GST rate cannot exceed 100%.');
-  const gstAmount = Number((subtotal * gstRate / 100).toFixed(2));
-  const totalAmount = Number((subtotal + gstAmount).toFixed(2));
+  const discountPercent = nonNegativeNumber(data.discount_percent, 'Discount', 0);
+  if (discountPercent > 100) throw validationError('Discount cannot exceed 100%.');
+  const discountAmount = Number((subtotal * discountPercent / 100).toFixed(2));
+  const taxableAmount = Math.max(0, subtotal - discountAmount);
+  const gstAmount = Number((taxableAmount * gstRate / 100).toFixed(2));
+  const finalPrice = nullableNonNegativeNumber(data.final_price, 'Final price');
+  const totalAmount = finalPrice === null ? Number((taxableAmount + gstAmount).toFixed(2)) : Number(finalPrice.toFixed(2));
 
   return {
     leadId: positiveInteger(data.lead_id, 'Lead'),
     companyName: requiredString(data.company_name, 'Company name', 255),
     contactPersonName: nullableString(data.contact_person_name, 'Contact person name', 255),
-    contactPersonEmail: nullableString(data.contact_person_email, 'Contact person email', 255),
+    contactPersonEmail: nullableEmail(data.contact_person_email, 'Contact person email'),
     contactPersonPhone: nullablePhone(data.contact_person_phone, 'Contact person phone'),
     billingName: requiredString(data.billing_name, 'Billing name', 255),
     billingAddress: requiredString(data.billing_address, 'Billing address', 5000),
     billingCity: nullableString(data.billing_city, 'Billing city', 255),
     billingState: nullableString(data.billing_state, 'Billing state', 255),
-    billingPincode: nullableString(data.billing_pincode, 'Billing pincode', 20),
-    billingGstin: nullableString(data.billing_gstin, 'Billing GSTIN', 20),
-    billingEmail: nullableString(data.billing_email, 'Billing email', 255),
+    billingPincode: nullablePincode(data.billing_pincode, 'Billing pincode'),
+    billingGstin: nullableGstin(data.billing_gstin, 'Billing GSTIN'),
+    billingEmail: nullableEmail(data.billing_email, 'Billing email'),
     billingPhone: nullablePhone(data.billing_phone, 'Billing phone'),
     lineItems,
     subtotal,
     gstRate,
     gstAmount,
     totalAmount,
+    discountPercent,
+    discountAmount,
+    finalPrice,
+    paymentTerms: nullableString(data.payment_terms, 'Payment terms', 1000),
+    deliveryDays: nullableInteger(data.delivery_days, 'Delivery days'),
+    warrantyTerms: nullableString(data.warranty_terms, 'Warranty terms', 1000),
+    customerPoNumber: nullableString(data.customer_po_number, 'Customer PO number', 100),
+    customerPoDate: normalizeDate(data.customer_po_date, 'Customer PO date'),
     validUntil: normalizeDate(data.valid_until, 'Valid until'),
     notes: nullableString(data.notes, 'Notes', 5000),
     revisionReason: nullableString(data.revision_reason, 'Revision reason', 5000),
@@ -140,7 +198,44 @@ function normalizedValues(data) {
 
 async function retrieveQuotations() {
   const result = await pool.query(
-    `SELECT ${QUOTATION_COLUMNS}
+    `SELECT ${QUOTATION_COLUMNS},
+       COALESCE((
+         SELECT json_agg(json_build_object(
+           'id', n.id,
+           'lead_id', n.lead_id,
+           'quotation_id', n.quotation_id,
+           'negotiation_type', n.negotiation_type,
+           'old_value', n.old_value,
+           'proposed_value', n.proposed_value,
+           'reason', n.reason,
+           'requested_by_name', n.requested_by_name,
+           'requested_by_role', n.requested_by_role,
+           'requires_approval', n.requires_approval,
+           'approval_request_id', n.approval_request_id,
+           'status', n.status,
+           'created_at', n.created_at,
+           'updated_at', n.updated_at
+         ) ORDER BY n.created_at DESC, n.id DESC)
+         FROM negotiations n
+         WHERE n.quotation_id = quotations.id
+       ), '[]'::json) AS negotiations
+       , (
+         SELECT json_build_object(
+           'handover_id', h.id,
+           'handover_number', h.handover_number,
+           'handover_status', h.status,
+           'project_id', p.id,
+           'project_number', p.project_number,
+           'project_status', p.status,
+           'project_progress', p.overall_progress
+         )
+         FROM crm_erp_handovers h
+         LEFT JOIN projects p ON p.id = h.project_id
+         WHERE h.quotation_id = quotations.id
+           AND h.status NOT IN ('rejected', 'cancelled')
+         ORDER BY h.created_at DESC, h.id DESC
+         LIMIT 1
+       ) AS erp_handover
      FROM quotations
      ORDER BY created_at DESC, id DESC`,
   );
@@ -188,13 +283,22 @@ async function createQuotation(data, user) {
       gst_rate,
       gst_amount,
       total_amount,
+      discount_percent,
+      discount_amount,
+      final_price,
+      payment_terms,
+      delivery_days,
+      warranty_terms,
+      customer_po_number,
+      customer_po_date,
+      order_confirmed_at,
       valid_until,
       notes,
       revision_number,
       is_current_revision,
       revision_reason,
       negotiation_notes
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, 0, TRUE, $22, $23)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, NULL, 0, TRUE, $30, $31)
     RETURNING ${QUOTATION_COLUMNS}`,
     [
       quotationNumber,
@@ -216,6 +320,14 @@ async function createQuotation(data, user) {
       values.gstRate,
       values.gstAmount,
       values.totalAmount,
+      values.discountPercent,
+      values.discountAmount,
+      values.finalPrice,
+      values.paymentTerms,
+      values.deliveryDays,
+      values.warrantyTerms,
+      values.customerPoNumber,
+      values.customerPoDate,
       values.validUntil,
       values.notes,
       values.revisionReason,
@@ -270,12 +382,25 @@ async function updateQuotation(id, data, user) {
          gst_rate = $16,
          gst_amount = $17,
          total_amount = $18,
-         valid_until = $19,
-         notes = $20,
-         revision_reason = $21,
-         negotiation_notes = $22,
+         discount_percent = $19,
+         discount_amount = $20,
+         final_price = $21,
+         payment_terms = $22,
+         delivery_days = $23,
+         warranty_terms = $24,
+         customer_po_number = $25,
+         customer_po_date = $26,
+         order_confirmed_at = CASE
+           WHEN $25::varchar IS NOT NULL AND order_confirmed_at IS NULL THEN CURRENT_TIMESTAMP
+           WHEN $25::varchar IS NULL THEN NULL
+           ELSE order_confirmed_at
+         END,
+         valid_until = $27,
+         notes = $28,
+         revision_reason = $29,
+         negotiation_notes = $30,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $23 AND status = 'Draft'
+     WHERE id = $31 AND status = 'Draft'
      RETURNING ${QUOTATION_COLUMNS}`,
     [
       values.leadId,
@@ -296,6 +421,14 @@ async function updateQuotation(id, data, user) {
       values.gstRate,
       values.gstAmount,
       values.totalAmount,
+      values.discountPercent,
+      values.discountAmount,
+      values.finalPrice,
+      values.paymentTerms,
+      values.deliveryDays,
+      values.warrantyTerms,
+      values.customerPoNumber,
+      values.customerPoDate,
       values.validUntil,
       values.notes,
       values.revisionReason,
@@ -490,6 +623,15 @@ async function createQuotationRevision(id, data = {}, user) {
         gst_rate,
         gst_amount,
         total_amount,
+        discount_percent,
+        discount_amount,
+        final_price,
+        payment_terms,
+        delivery_days,
+        warranty_terms,
+        customer_po_number,
+        customer_po_date,
+        order_confirmed_at,
         valid_until,
         status,
         notes,
@@ -499,7 +641,7 @@ async function createQuotationRevision(id, data = {}, user) {
         is_current_revision,
         revision_reason,
         negotiation_notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 'Draft', $21, $22, $23, $24, TRUE, $25, $26)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, NULL, 'Draft', $29, $30, $31, $32, TRUE, $33, $34)
       RETURNING ${QUOTATION_COLUMNS}`,
       [
         quotationNumber,
@@ -521,6 +663,14 @@ async function createQuotationRevision(id, data = {}, user) {
         source.gst_rate,
         source.gst_amount,
         source.total_amount,
+        source.discount_percent,
+        source.discount_amount,
+        source.final_price,
+        source.payment_terms,
+        source.delivery_days,
+        source.warranty_terms,
+        source.customer_po_number,
+        source.customer_po_date,
         source.valid_until,
         source.notes,
         groupId,

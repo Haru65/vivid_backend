@@ -30,7 +30,9 @@ const LEAD_TABLE_COLUMNS = `
   l.raw_data
 `;
 
-const ACTIVITY_TYPES = new Set(['note', 'call', 'whatsapp', 'system', 'email', 'meeting']);
+const ACTIVITY_TYPES = new Set(['note', 'call', 'whatsapp', 'system', 'email', 'meeting', 'negotiation', 'approval_requested', 'approval']);
+const LEAD_STATUSES = new Set(['New', 'Qualified', 'Proposal Sent', 'Negotiation', 'Proposal Accepted', 'Lost']);
+const QUOTATION_REQUIRED_STATUSES = new Set(['Proposal Sent', 'Negotiation', 'Proposal Accepted']);
 const FOLLOWUP_TYPES = new Set(['Call', 'WhatsApp', 'Email', 'Meeting', 'Payment', 'Quotation', 'General']);
 const FOLLOWUP_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
 const FOLLOWUP_STATUSES = new Set(['Open', 'Completed', 'Cancelled']);
@@ -42,7 +44,7 @@ function validationError(message) {
 }
 
 function activityColumns(alias = 'a') {
-  return `${alias}.id, ${alias}.lead_id, ${alias}.activity_type, ${alias}.content, ${alias}.actor_name, ${alias}.created_at`;
+  return `${alias}.id, ${alias}.lead_id, ${alias}.activity_type, ${alias}.content, ${alias}.actor_name, ${alias}.metadata, ${alias}.created_at`;
 }
 
 function followupColumns(alias = 'f') {
@@ -75,7 +77,10 @@ function normalizeActivity(activityData = {}) {
   }
   const content = activityData.content.trim();
   if (content.length > 5000) throw validationError('Activity content is too long.');
-  return { type, content };
+  const metadata = activityData.metadata && typeof activityData.metadata === 'object' && !Array.isArray(activityData.metadata)
+    ? activityData.metadata
+    : {};
+  return { type, content, metadata };
 }
 
 function actorName(user) {
@@ -110,6 +115,19 @@ function phone(value, field, required = false) {
   if (required && !digits) throw validationError(`${field} is required.`);
   if (digits && digits.length !== 10) throw validationError(`${field} must be exactly 10 digits.`);
   return digits || null;
+}
+
+function email(value, field, required = false) {
+  const result = text(value, field, 255, required);
+  if (!result) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(result)) throw validationError(`${field} must be a valid email address.`);
+  return result;
+}
+
+function jsonObject(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw validationError(`${field} must be a JSON object.`);
+  return value;
 }
 
 function normalizeFollowup(data = {}, fallbackAssignee) {
@@ -151,12 +169,12 @@ async function leadForAccess(leadId, user) {
 }
 
 async function insertLeadActivity(leadId, activityData, user, db = pool) {
-  const { type, content } = normalizeActivity(activityData);
+  const { type, content, metadata } = normalizeActivity(activityData);
   const result = await db.query(
-    `INSERT INTO lead_activities (lead_id, activity_type, content, actor_name)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO lead_activities (lead_id, activity_type, content, actor_name, metadata)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING ${activityColumns('lead_activities')}`,
-    [leadId, type, content, actorName(user)],
+    [leadId, type, content, actorName(user), JSON.stringify(metadata)],
   );
   return result.rows[0];
 }
@@ -180,6 +198,7 @@ async function retrieveLead(id) {
           'activity_type', a.activity_type,
           'content', a.content,
           'actor_name', a.actor_name,
+          'metadata', a.metadata,
           'created_at', a.created_at
         ) ORDER BY a.created_at DESC, a.id DESC)
         FROM lead_activities a
@@ -226,18 +245,49 @@ function leadUpdateActivities(previous, next) {
 }
 
 function leadValues(leadData) {
+  const status = text(leadData.lead_status, 'Lead status', 50, true);
+  if (!LEAD_STATUSES.has(status)) throw validationError('Lead status is invalid.');
   return [
-    leadData.company_name,
-    leadData.contact_person_name,
-    leadData.contact_person_email,
+    text(leadData.company_name, 'Company name', 255, true),
+    text(leadData.contact_person_name, 'Contact person', 255, true),
+    email(leadData.contact_person_email, 'Contact email', true),
     phone(leadData.contact_person_phone, 'Contact phone', true),
-    leadData.quotation || null,
-    leadData.lead_source,
-    leadData.lead_status,
-    leadData.requirements_summary || null,
-    leadData.assigned_to || null,
-    leadData.raw_data || null,
+    text(leadData.quotation, 'Quotation reference', 255),
+    text(leadData.lead_source, 'Lead source', 255, true),
+    status,
+    text(leadData.requirements_summary, 'Requirements summary', 5000),
+    text(leadData.assigned_to, 'Assigned to', 255),
+    jsonObject(leadData.raw_data, 'Raw data'),
   ];
+}
+
+async function sentQuotationForLead(lead) {
+  const params = [lead.id];
+  let where = 'lead_id = $1';
+  if (lead.quotation) {
+    params.push(lead.quotation);
+    where = '(lead_id = $1 OR quotation_number = $2)';
+  }
+  const result = await pool.query(
+    `SELECT id, quotation_number, status
+     FROM quotations
+     WHERE ${where}
+       AND status IN ('Sent', 'Approved', 'Superseded')
+     ORDER BY sent_at DESC NULLS LAST, created_at DESC, id DESC
+     LIMIT 1`,
+    params,
+  );
+  return result.rows[0] || null;
+}
+
+async function ensureLeadStatusAllowed(lead, nextStatus) {
+  if (!QUOTATION_REQUIRED_STATUSES.has(nextStatus)) return null;
+  const quotation = await sentQuotationForLead(lead);
+  if (!quotation) {
+    const action = nextStatus === 'Proposal Accepted' ? 'accepting this lead' : `moving this lead to ${nextStatus}`;
+    throw validationError(`Send a quotation before ${action}.`);
+  }
+  return quotation;
 }
 
 async function retrieveLeads() {
@@ -250,6 +300,7 @@ async function retrieveLeads() {
           'activity_type', a.activity_type,
           'content', a.content,
           'actor_name', a.actor_name,
+          'metadata', a.metadata,
           'created_at', a.created_at
         ) ORDER BY a.created_at DESC, a.id DESC)
         FROM lead_activities a
@@ -442,6 +493,10 @@ async function cancelLeadFollowup(leadId, followupId, user) {
 }
 
 async function createLead(leadData, user) {
+  const values = leadValues(leadData);
+  if (QUOTATION_REQUIRED_STATUSES.has(values[6])) {
+    throw validationError(`Create the lead and send a quotation before moving it to ${values[6]}.`);
+  }
   const result = await pool.query(
     `INSERT INTO leads (
       company_name,
@@ -456,7 +511,7 @@ async function createLead(leadData, user) {
       raw_data
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
     RETURNING ${LEAD_COLUMNS}`,
-    leadValues(leadData),
+    values,
   );
   const lead = result.rows[0];
 
@@ -478,6 +533,12 @@ async function updateLead(id, leadData, user) {
   const previous = previousResult.rows[0];
   if (!previous) return null;
 
+  const values = leadValues(leadData);
+  await ensureLeadStatusAllowed({
+    ...previous,
+    quotation: values[4] || previous.quotation,
+  }, values[6]);
+
   const result = await pool.query(
     `UPDATE leads
      SET company_name = $1,
@@ -492,7 +553,7 @@ async function updateLead(id, leadData, user) {
          raw_data = $10
      WHERE id = $11
      RETURNING ${LEAD_COLUMNS}`,
-    [...leadValues(leadData), id],
+    [...values, id],
   );
 
   const lead = result.rows[0] || null;
@@ -516,13 +577,22 @@ async function deleteLead(id) {
 }
 
 async function acceptProposal(id, quotation, user) {
+  const previousResult = await pool.query(
+    `SELECT ${LEAD_COLUMNS}
+     FROM leads
+     WHERE id = $1`,
+    [id],
+  );
+  const previous = previousResult.rows[0];
+  if (!previous) return null;
+  const sentQuotation = await ensureLeadStatusAllowed(previous, 'Proposal Accepted');
   const result = await pool.query(
     `UPDATE leads
      SET lead_status = 'Proposal Accepted',
          quotation = $1
      WHERE id = $2
      RETURNING ${LEAD_COLUMNS}`,
-    [quotation || 'Sent', id],
+    [quotation && quotation !== 'Sent' ? quotation : sentQuotation.quotation_number, id],
   );
 
   const lead = result.rows[0] || null;

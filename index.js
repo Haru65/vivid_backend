@@ -3,6 +3,9 @@ const leadRouter = require('./routes/lead_dashboard');
 const customerRouter = require('./routes/customers');
 const quotationRouter = require('./routes/quotations');
 const meetingRouter = require('./routes/meetings');
+const approvalRouter = require('./routes/approvals');
+const erpRouter = require('./routes/erp');
+const projectRouter = require('./routes/projects');
 const { createSchemas } = require('./config/db_schema');
 
 
@@ -29,6 +32,9 @@ app.use('/leads', leadRouter);
 app.use('/customers', customerRouter);
 app.use('/quotations', quotationRouter);
 app.use('/meetings', meetingRouter);
+app.use('/approvals', approvalRouter);
+app.use('/erp', erpRouter);
+app.use('/projects', projectRouter);
 
 async function startServer() {
   try {
