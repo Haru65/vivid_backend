@@ -12,20 +12,42 @@ const { createSchemas } = require('./config/db_schema');
 const { authenticateToken } = require('./middleware/auth');
 
 
-
-
+const dotenv = require('dotenv');
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3001;
 
 app.use((req, res, next) => {
   const origin = req.headers.origin || '';
-  const localOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  if (localOrigin) res.header('Access-Control-Allow-Origin', origin);
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-User-Name, X-User-Role');
-  res.header('Access-Control-Expose-Headers', 'Content-Disposition');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
+
+  const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(o => o.trim());
+
+  if (allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
+
+  res.header(
+    'Access-Control-Allow-Headers',
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-User-Name, X-User-Role'
+  );
+
+  res.header(
+    'Access-Control-Expose-Headers',
+    'Content-Disposition'
+  );
+
+  res.header(
+    'Access-Control-Allow-Methods',
+    'GET,POST,PUT,DELETE,OPTIONS'
+  );
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
   next();
 });
 
