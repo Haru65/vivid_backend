@@ -5,17 +5,12 @@ const {
   updateMeeting,
   deleteMeeting,
 } = require('../controller/meetings');
+const { optionalUser } = require('../middleware/auth');
 
 const router = express.Router();
 
 function currentUser(req) {
-  const role = String(req.get('x-user-role') || 'admin').toLowerCase() === 'salesperson'
-    ? 'salesperson'
-    : 'admin';
-  return {
-    role,
-    name: String(req.get('x-user-name') || 'Ashish Vibhute').trim() || 'Ashish Vibhute',
-  };
+  return optionalUser(req);
 }
 
 function handleError(res, message, error) {

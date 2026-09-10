@@ -1,5 +1,8 @@
 const pool = require('../config/db_connection');
 const { logLeadActivity } = require('./leads');
+const { sendEmail } = require('../services/emailService');
+const { generateQuotationPdf } = require('../services/quotationGeneration');
+const { getTaxSettings } = require('./settings');
 
 const QUOTATION_COLUMNS = `
   id,
@@ -51,6 +54,95 @@ function validationError(message) {
   const error = new Error(message);
   error.statusCode = 400;
   return error;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatMoney(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return escapeHtml(value || 'Not added');
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 2,
+  }).format(amount);
+}
+
+function quotationEmailTemplate(quotation) {
+  const lineItems = Array.isArray(quotation.line_items) ? quotation.line_items : [];
+  const rows = lineItems.map((item) => `
+    <tr>
+      <td>${escapeHtml(item.description)}</td>
+      <td>${escapeHtml(item.quantity)}</td>
+      <td>${formatMoney(item.unit_price)}</td>
+      <td>${formatMoney(item.amount || Number(item.quantity || 0) * Number(item.unit_price || 0))}</td>
+    </tr>
+  `).join('');
+
+  return {
+    subject: `Quotation ${quotation.quotation_number} - Vivid Electromech`,
+    html:`
+    <div style="font-family: Arial, sans-serif; color: #222; line-height: 1.6;">
+      <p>Dear Sir/Madam,</p>
+
+      <p>
+        Please find attached our quotation for your kind review and consideration.
+      </p>
+
+      <p>
+        We trust the enclosed offer is in line with your requirements. Should you require
+        any clarification or further information, please feel free to contact us.
+      </p>
+
+      <p>
+        We look forward to your valuable response.
+      </p>
+
+      <br />
+
+      <p>
+        Thanking you,<br />
+        Yours faithfully,<br />
+        <strong>Vivid Electromech Limited</strong>
+      </p>
+    </div>
+`
+  };
+}
+
+async function sendQuotationEmail(quotation, user) {
+  const to = quotation.contact_person_email || quotation.billing_email;
+  if (!to) throw validationError('Lead contact email or billing email is required before sending quotation.');
+
+  const { pdf, filename } = {
+    pdf: await generateQuotationPdf(quotation, user),
+    filename: `${quotation.quotation_number}.pdf`,
+  };
+  const template = quotationEmailTemplate(quotation);
+  const result = await sendEmail({
+    to,
+    subject: template.subject,
+    html: template.html,
+    attachments: [
+      {
+        filename,
+        content: Buffer.from(pdf).toString('base64'),
+      },
+    ],
+  });
+
+  return {
+    ...result,
+    to,
+    subject: template.subject,
+  };
 }
 
 function requiredString(value, field, maxLength) {
@@ -149,10 +241,10 @@ function normalizeLineItems(items) {
   });
 }
 
-function normalizedValues(data) {
+function normalizedValues(data, taxSettings = { gst_rate: 18 }) {
   const lineItems = normalizeLineItems(data.line_items);
   const subtotal = Number(lineItems.reduce((sum, item) => sum + item.amount, 0).toFixed(2));
-  const gstRate = nonNegativeNumber(data.gst_rate, 'GST rate', 18);
+  const gstRate = nonNegativeNumber(data.gst_rate, 'GST rate', taxSettings.gst_rate);
   if (gstRate > 100) throw validationError('GST rate cannot exceed 100%.');
   const discountPercent = nonNegativeNumber(data.discount_percent, 'Discount', 0);
   if (discountPercent > 100) throw validationError('Discount cannot exceed 100%.');
@@ -251,8 +343,37 @@ async function findLead(leadId) {
   return result.rows[0] || null;
 }
 
+async function generateQuotationDocument(id, user) {
+  const result = await pool.query(
+    `SELECT ${QUOTATION_COLUMNS},
+       (SELECT assigned_to FROM leads WHERE leads.id = quotations.lead_id) AS assigned_to
+     FROM quotations
+     WHERE quotations.id = $1`,
+    [id],
+  );
+  const quotation = result.rows[0];
+  if (!quotation) {
+    const error = new Error('Quotation not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const pdf = await generateQuotationPdf(quotation, user);
+  await logLeadActivity(quotation.lead_id, {
+    activity_type: 'system',
+    content: `Quotation PDF generated for ${quotation.quotation_number}`,
+  }, user);
+
+  return {
+    filename: `${quotation.quotation_number}.pdf`,
+    pdf,
+    quotation,
+  };
+}
+
 async function createQuotation(data, user) {
-  const values = normalizedValues(data);
+  const taxSettings = await getTaxSettings();
+  const values = normalizedValues(data, taxSettings);
   const lead = await findLead(values.leadId);
   if (!lead) {
     const error = new Error('Lead not found');
@@ -298,7 +419,7 @@ async function createQuotation(data, user) {
       is_current_revision,
       revision_reason,
       negotiation_notes
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, NULL, 0, TRUE, $30, $31)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NULL, $28, $29, 0, TRUE, $30, $31)
     RETURNING ${QUOTATION_COLUMNS}`,
     [
       quotationNumber,
@@ -641,7 +762,7 @@ async function createQuotationRevision(id, data = {}, user) {
         is_current_revision,
         revision_reason,
         negotiation_notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, NULL, 'Draft', $29, $30, $31, $32, TRUE, $33, $34)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NULL, $28, 'Draft', $29, $30, $31, $32, TRUE, $33, $34)
       RETURNING ${QUOTATION_COLUMNS}`,
       [
         quotationNumber,
@@ -710,6 +831,7 @@ async function sendQuotation(id, user) {
   const client = await pool.connect();
   let updatedQuotation = null;
   let supersededQuotations = [];
+  let emailResult = null;
   try {
     await client.query('BEGIN');
     const quotationResult = await client.query(
@@ -727,6 +849,8 @@ async function sendQuotation(id, user) {
       error.statusCode = 400;
       throw error;
     }
+
+    emailResult = await sendQuotationEmail(quotation, user);
 
     const groupId = quotation.revision_group_id || quotation.id;
     await client.query(
@@ -779,8 +903,15 @@ async function sendQuotation(id, user) {
     await client.query('COMMIT');
 
     await logLeadActivity(updatedQuotation.lead_id, {
-      activity_type: 'system',
-      content: `${updatedQuotation.revision_number > 0 ? 'Revision' : 'Quotation'} ${updatedQuotation.quotation_number} sent to lead`,
+      activity_type: 'email',
+      content: `${updatedQuotation.revision_number > 0 ? 'Revision' : 'Quotation'} ${updatedQuotation.quotation_number} emailed to ${emailResult.to}`,
+      metadata: {
+        quotation_id: updatedQuotation.id,
+        quotation_number: updatedQuotation.quotation_number,
+        email_to: emailResult.to,
+        email_subject: emailResult.subject,
+        email_provider_id: emailResult.id,
+      },
     }, user);
     await Promise.all(supersededQuotations.map((item) => logLeadActivity(updatedQuotation.lead_id, {
       activity_type: 'system',
@@ -803,4 +934,5 @@ module.exports = {
   updateQuotation,
   deleteQuotation,
   sendQuotation,
+  generateQuotationDocument,
 };

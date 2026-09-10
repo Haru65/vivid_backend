@@ -1,4 +1,5 @@
 const pool = require('./db_connection');
+const { createUserSchema } = require('../controller/userManagement');
 
 async function createLeadSchema() {
   await pool.query(`
@@ -504,7 +505,26 @@ async function createMeetingSchema() {
   console.log('Meeting schema created successfully.');
 }
 
+async function createSettingsSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS system_settings (
+      key VARCHAR(100) PRIMARY KEY,
+      value JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    INSERT INTO system_settings (key, value)
+    VALUES ('tax_rates', '{"gst_rate": 18, "cgst_rate": 9, "sgst_rate": 9}'::jsonb)
+    ON CONFLICT (key) DO NOTHING;
+  `);
+
+  console.log('Settings schema created successfully.');
+}
+
 async function createSchemas() {
+  await createUserSchema();
   try {
     await createLeadSchema();
   } catch (error) {
@@ -518,8 +538,9 @@ async function createSchemas() {
   await createCustomerSchema();
   await createQuotationSchema();
   await createMeetingSchema();
+  await createSettingsSchema();
   await createNegotiationApprovalSchema();
   await createHandoverProjectSchema();
 }
 
-module.exports = { createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createMeetingSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createSchemas };
+module.exports = { createUserSchema, createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createMeetingSchema, createSettingsSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createSchemas };

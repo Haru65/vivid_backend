@@ -13,17 +13,12 @@ const {
   deleteLead,
   acceptProposal,
 } = require('../controller/leads');
+const { optionalUser } = require('../middleware/auth');
 
 const router = express.Router();
 
 function currentUser(req) {
-  const role = String(req.get('x-user-role') || 'admin').toLowerCase() === 'salesperson'
-    ? 'salesperson'
-    : 'admin';
-  return {
-    role,
-    name: String(req.get('x-user-name') || 'Ashish Vibhute').trim() || 'Ashish Vibhute',
-  };
+  return optionalUser(req);
 }
 
 function handleActivityError(res, message, error) {

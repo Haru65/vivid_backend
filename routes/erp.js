@@ -12,16 +12,12 @@ const {
   getProject,
   listProjects,
 } = require('../services/projectService');
+const { optionalUser } = require('../middleware/auth');
 
 const router = express.Router();
 
 function currentUser(req) {
-  const rawRole = String(req.get('x-user-role') || 'admin').trim().toLowerCase();
-  const role = ['salesperson', 'erp', 'admin'].includes(rawRole) ? rawRole : 'salesperson';
-  return {
-    role,
-    name: String(req.get('x-user-name') || 'Ashish Vibhute').trim() || 'Ashish Vibhute',
-  };
+  return optionalUser(req);
 }
 
 function handleError(res, message, error) {

@@ -6,7 +6,10 @@ const meetingRouter = require('./routes/meetings');
 const approvalRouter = require('./routes/approvals');
 const erpRouter = require('./routes/erp');
 const projectRouter = require('./routes/projects');
+const settingsRouter = require('./routes/settings');
+const authRouter = require('./routes/auth');
 const { createSchemas } = require('./config/db_schema');
+const { authenticateToken } = require('./middleware/auth');
 
 
 
@@ -19,7 +22,8 @@ app.use((req, res, next) => {
   const origin = req.headers.origin || '';
   const localOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   if (localOrigin) res.header('Access-Control-Allow-Origin', origin);
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, X-User-Name, X-User-Role');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-User-Name, X-User-Role');
+  res.header('Access-Control-Expose-Headers', 'Content-Disposition');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -28,6 +32,9 @@ app.use((req, res, next) => {
 // Middleware to parse JSON requests
 app.use(express.json());
 
+app.use('/auth', authRouter);
+app.use(authenticateToken);
+
 app.use('/leads', leadRouter);
 app.use('/customers', customerRouter);
 app.use('/quotations', quotationRouter);
@@ -35,6 +42,7 @@ app.use('/meetings', meetingRouter);
 app.use('/approvals', approvalRouter);
 app.use('/erp', erpRouter);
 app.use('/projects', projectRouter);
+app.use('/settings', settingsRouter);
 
 async function startServer() {
   try {

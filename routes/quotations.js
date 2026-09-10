@@ -6,23 +6,19 @@ const {
   updateQuotation,
   deleteQuotation,
   sendQuotation,
+  generateQuotationDocument,
 } = require('../controller/quotations');
 const {
   checkNegotiation,
   createNegotiation,
 } = require('../services/negotiationService');
 const { checkHandoverEligibility } = require('../services/handoverService');
+const { optionalUser } = require('../middleware/auth');
 
 const router = express.Router();
 
 function currentUser(req) {
-  const role = String(req.get('x-user-role') || 'admin').toLowerCase() === 'salesperson'
-    ? 'salesperson'
-    : 'admin';
-  return {
-    role,
-    name: String(req.get('x-user-name') || 'Ashish Vibhute').trim() || 'Ashish Vibhute',
-  };
+  return optionalUser(req);
 }
 
 function handleError(res, message, error) {
@@ -53,6 +49,17 @@ router.post('/:id/revisions', async (req, res) => {
     res.status(201).json(await createQuotationRevision(req.params.id, req.body, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to create quotation revision', error);
+  }
+});
+
+router.get('/:id/pdf', async (req, res) => {
+  try {
+    const { filename, pdf } = await generateQuotationDocument(req.params.id, currentUser(req));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdf);
+  } catch (error) {
+    handleError(res, 'Unable to generate quotation PDF', error);
   }
 });
 

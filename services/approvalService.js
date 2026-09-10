@@ -1,5 +1,6 @@
 const pool = require('../config/db_connection');
 const { logLeadActivity } = require('../controller/leads');
+const { APPROVAL_EMAIL_TYPES, sendApprovalEmail } = require('./approvalEmailService');
 const { applyNegotiationToQuotation, getQuotationWithNegotiations, negotiationLabel } = require('./negotiationService');
 
 function appError(message, statusCode = 400) {
@@ -12,9 +13,27 @@ function actorName(user) {
   return user?.name || 'Workspace user';
 }
 
+function samePerson(left, right) {
+  return String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
+}
+
+function isRequester(user, approval) {
+  return samePerson(approval?.requested_by_name, actorName(user));
+}
+
+function isAssignedApprover(user, approval) {
+  return samePerson(approval?.approver_name, actorName(user));
+}
+
+function canViewApproval(user, approval) {
+  return isRequester(user, approval) || isAssignedApprover(user, approval);
+}
+
 function ensureApprover(user, approval) {
-  if (user?.role !== 'admin') throw appError('Only GA/admin users can approve or reject requests.', 403);
-  if (approval && approval.requested_by_name === actorName(user)) {
+  if (!isAssignedApprover(user, approval)) {
+    throw appError('Only the assigned approval person can approve or reject this request.', 403);
+  }
+  if (isRequester(user, approval)) {
     throw appError('Users cannot approve their own GA approval requests.', 403);
   }
 }
@@ -44,12 +63,8 @@ function approvalSelect(whereClause = '', orderClause = 'ORDER BY ar.requested_a
 }
 
 async function listApprovals(user) {
-  const params = [];
-  let where = '';
-  if (user?.role !== 'admin') {
-    params.push(actorName(user));
-    where = 'WHERE ar.requested_by_name = $1';
-  }
+  const params = [actorName(user)];
+  const where = 'WHERE LOWER(TRIM(ar.requested_by_name)) = LOWER(TRIM($1)) OR LOWER(TRIM(COALESCE(ar.approver_name, \'\'))) = LOWER(TRIM($1))';
   const result = await pool.query(approvalSelect(where), params);
   return result.rows;
 }
@@ -58,8 +73,8 @@ async function getApproval(id, user) {
   const result = await pool.query(approvalSelect('WHERE ar.id = $1', ''), [id]);
   const approval = result.rows[0];
   if (!approval) throw appError('Approval request not found.', 404);
-  if (user?.role !== 'admin' && approval.requested_by_name !== actorName(user)) {
-    throw appError('You can view only your own approval requests.', 403);
+  if (!canViewApproval(user, approval)) {
+    throw appError('You can view only approval requests assigned to you or requested by you.', 403);
   }
   return approval;
 }
@@ -70,6 +85,93 @@ function normalizeComments(value) {
   const comments = value.trim();
   if (comments.length > 5000) throw appError('Comments are too long.');
   return comments || null;
+}
+
+function frontendUrl(path) {
+  const base = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:5173';
+  return `${base.replace(/\/$/, '')}${path}`;
+}
+
+function numberOrNull(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function marginPercent(orderValue, totalCost) {
+  const order = numberOrNull(orderValue);
+  const cost = numberOrNull(totalCost);
+  if (!order || cost === null) return null;
+  return ((order - cost) / order) * 100;
+}
+
+function discountPercent(currentValue, proposedValue) {
+  const current = numberOrNull(currentValue);
+  const proposed = numberOrNull(proposedValue);
+  if (!current || proposed === null) return null;
+  return ((current - proposed) / current) * 100;
+}
+
+function inferApprovalEmailType(approval) {
+  const metadata = approval.metadata || {};
+  if (metadata.approval_email_type) return metadata.approval_email_type;
+
+  const routeText = [
+    approval.approver_role,
+    approval.approver_name,
+    metadata.approver_title,
+    approval.approval_type,
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  if (routeText.includes('estimation')) return APPROVAL_EMAIL_TYPES.ESTIMATION_HOD;
+  if (routeText.includes('sales')) return APPROVAL_EMAIL_TYPES.SALES_HOD;
+  return APPROVAL_EMAIL_TYPES.MANAGEMENT;
+}
+
+async function findApproverEmail(client, approval) {
+  const metadata = approval.metadata || {};
+  if (metadata.approver_email) return metadata.approver_email;
+
+  const name = String(approval.approver_name || '').trim();
+  if (!name) return null;
+
+  const result = await client.query(
+    `SELECT email
+     FROM users
+     WHERE is_active = TRUE
+       AND LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = LOWER($1)
+     ORDER BY id ASC
+     LIMIT 1`,
+    [name],
+  );
+
+  return result.rows[0]?.email || null;
+}
+
+function approvalEmailData(approval) {
+  const metadata = approval.metadata || {};
+  const lastPitch = metadata.last_pitch || {};
+  const orderValue = metadata.current_total || lastPitch.total_amount || approval.total_amount;
+  const totalCost = metadata.total_cost || metadata.cost_total || metadata.material_cost || approval.subtotal;
+  const proposedValue = approval.proposed_value;
+
+  return {
+    quotationNumber: approval.quotation_number,
+    customerName: approval.company_name,
+    currentValue: approval.old_value || orderValue,
+    proposedValue,
+    discountPercent: metadata.discount_percent || lastPitch.discount_percent || discountPercent(approval.old_value || orderValue, proposedValue),
+    reason: metadata.client_pitch || approval.negotiation_reason || approval.reason,
+    approvalUrl: frontendUrl(`/approvals/${approval.id}`),
+    materialCost: metadata.material_cost,
+    labourCost: metadata.labour_cost,
+    totalCost,
+    sellingPrice: metadata.selling_price || proposedValue || orderValue,
+    marginPercent: metadata.margin_percent || marginPercent(metadata.selling_price || proposedValue || orderValue, totalCost),
+    orderValue: proposedValue || orderValue,
+    paymentTerms: metadata.payment_terms || lastPitch.payment_terms,
+    deliveryTerms: metadata.delivery_terms || (lastPitch.delivery_days ? `${lastPitch.delivery_days} days` : null),
+  };
 }
 
 async function approveRequest(id, data, user) {
@@ -224,13 +326,32 @@ async function requestApprovalEmail(id, user) {
     const approval = result.rows[0];
     if (!approval) throw appError('Approval request not found.', 404);
     if (approval.status !== 'pending') throw appError('Only pending approvals can be emailed.', 409);
-    if (user?.role !== 'admin' && approval.requested_by_name !== actorName(user)) {
-      throw appError('Only the requester or GA/admin can prepare this approval email.', 403);
+    if (!canViewApproval(user, approval)) {
+      throw appError('Only the requester or assigned approval person can prepare this approval email.', 403);
     }
+
+    const approverEmail = await findApproverEmail(client, approval);
+    if (!approverEmail) {
+      throw appError('Approver email could not be found. Add the approver as an active user or provide approver_email in approval metadata.', 400);
+    }
+
+    const emailType = inferApprovalEmailType(approval);
+    const emailResult = await sendApprovalEmail(
+      emailType,
+      {
+        name: approval.approver_name || approval.approver_role || 'Approver',
+        email: approverEmail,
+      },
+      approvalEmailData(approval),
+    );
 
     const metadata = {
       ...(approval.metadata || {}),
-      email_status: 'requested',
+      email_status: 'sent',
+      email_type: emailType,
+      email_to: approverEmail,
+      email_provider_id: emailResult?.id,
+      email_subject: emailResult.subject,
       email_requested_at: new Date().toISOString(),
       email_requested_by: actorName(user),
     };
@@ -242,39 +363,27 @@ async function requestApprovalEmail(id, user) {
       [JSON.stringify(metadata), approval.id],
     );
 
-    const pitch = approval.metadata || {};
-    const lastPitch = pitch.last_pitch || {};
-    const subject = `Approval Required - Quotation ${approval.quotation_number}`;
-    const body = [
-      `To: ${approval.approver_name || approval.approver_role || 'GA/admin'}${pitch.approver_title ? ` (${pitch.approver_title})` : ''}`,
-      `Customer: ${approval.company_name}`,
-      `Quotation: ${approval.quotation_number}`,
-      `Negotiation type: ${negotiationLabel(approval.negotiation_type)}`,
-      `Original value: ${approval.old_value || 'Not added'}`,
-      `Proposed value: ${approval.proposed_value}`,
-      `Last pitch total: ${lastPitch.total_amount || approval.total_amount || 'Not added'}`,
-      `Client pitch: ${pitch.client_pitch || approval.negotiation_reason || approval.reason || 'Not provided'}`,
-      `Reason: ${approval.negotiation_reason || approval.reason || 'Not provided'}`,
-      `Requested by: ${approval.requested_by_name}`,
-      `Approval request ID: ${approval.id}`,
-    ].join('\n');
-
     await logLeadActivity(approval.lead_id, {
       activity_type: 'email',
-      content: `GA approval email prepared for approval request #${approval.id}.`,
+      content: `GA approval email sent to ${approval.approver_name || approverEmail} for approval request #${approval.id}.`,
       metadata: {
         negotiation_id: approval.negotiation_id,
         approval_request_id: approval.id,
         quotation_id: approval.quotation_id,
-        email_status: 'requested',
-        email_subject: subject,
+        email_status: 'sent',
+        email_subject: emailResult.subject,
+        email_to: approverEmail,
       },
     }, user, client);
 
     await client.query('COMMIT');
     return {
       approval: await getApproval(id, user),
-      email_draft: { subject, body },
+      email: {
+        id: emailResult?.id,
+        to: approverEmail,
+        subject: emailResult.subject,
+      },
     };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
