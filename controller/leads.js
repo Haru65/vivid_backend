@@ -6,6 +6,9 @@ const LEAD_COLUMNS = `
   contact_person_name,
   contact_person_email,
   contact_person_phone,
+  enquiry_date,
+  priority,
+  industry_type,
   quotation,
   lead_source,
   lead_status,
@@ -21,6 +24,9 @@ const LEAD_TABLE_COLUMNS = `
   l.contact_person_name,
   l.contact_person_email,
   l.contact_person_phone,
+  l.enquiry_date,
+  l.priority,
+  l.industry_type,
   l.quotation,
   l.lead_source,
   l.lead_status,
@@ -32,6 +38,7 @@ const LEAD_TABLE_COLUMNS = `
 
 const ACTIVITY_TYPES = new Set(['note', 'call', 'whatsapp', 'system', 'email', 'meeting', 'negotiation', 'approval_requested', 'approval']);
 const LEAD_STATUSES = new Set(['New', 'Qualified', 'Proposal Sent', 'Negotiation', 'Proposal Accepted', 'Lost']);
+const LEAD_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
 const QUOTATION_REQUIRED_STATUSES = new Set(['Proposal Sent', 'Negotiation', 'Proposal Accepted']);
 const FOLLOWUP_TYPES = new Set(['Call', 'WhatsApp', 'Email', 'Meeting', 'Payment', 'Quotation', 'General']);
 const FOLLOWUP_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
@@ -104,6 +111,18 @@ function timestamp(value, field) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw validationError(`${field} must be a valid date and time.`);
   return date.toISOString();
+}
+
+function dateOnly(value, field, required = false) {
+  if (value === undefined || value === null || value === '') {
+    if (required) throw validationError(`${field} is required.`);
+    return null;
+  }
+  if (typeof value !== 'string') throw validationError(`${field} must be a valid date.`);
+  const trimmed = value.trim();
+  const date = new Date(`${trimmed}T00:00:00`);
+  if (Number.isNaN(date.getTime())) throw validationError(`${field} must be a valid date.`);
+  return trimmed.slice(0, 10);
 }
 
 function phone(value, field, required = false) {
@@ -233,6 +252,9 @@ function leadUpdateActivities(previous, next) {
     ['contact_person_name', 'contact person'],
     ['contact_person_email', 'contact email'],
     ['contact_person_phone', 'contact phone'],
+    ['enquiry_date', 'enquiry date'],
+    ['priority', 'priority'],
+    ['industry_type', 'industry type'],
     ['quotation', 'quotation reference'],
     ['lead_source', 'lead source'],
     ['requirements_summary', 'requirements summary'],
@@ -247,11 +269,16 @@ function leadUpdateActivities(previous, next) {
 function leadValues(leadData) {
   const status = text(leadData.lead_status, 'Lead status', 50, true);
   if (!LEAD_STATUSES.has(status)) throw validationError('Lead status is invalid.');
+  const priority = text(leadData.priority || 'Medium', 'Priority', 20, true);
+  if (!LEAD_PRIORITIES.has(priority)) throw validationError('Priority is invalid.');
   return [
     text(leadData.company_name, 'Company name', 255, true),
     text(leadData.contact_person_name, 'Contact person', 255, true),
     email(leadData.contact_person_email, 'Contact email', true),
     phone(leadData.contact_person_phone, 'Contact phone', true),
+    dateOnly(leadData.enquiry_date, 'Enquiry date', true),
+    priority,
+    text(leadData.industry_type, 'Industry type', 100),
     text(leadData.quotation, 'Quotation reference', 255),
     text(leadData.lead_source, 'Lead source', 255, true),
     status,
@@ -494,8 +521,8 @@ async function cancelLeadFollowup(leadId, followupId, user) {
 
 async function createLead(leadData, user) {
   const values = leadValues(leadData);
-  if (QUOTATION_REQUIRED_STATUSES.has(values[6])) {
-    throw validationError(`Create the lead and send a quotation before moving it to ${values[6]}.`);
+  if (QUOTATION_REQUIRED_STATUSES.has(values[9])) {
+    throw validationError(`Create the lead and send a quotation before moving it to ${values[9]}.`);
   }
   const result = await pool.query(
     `INSERT INTO leads (
@@ -503,13 +530,16 @@ async function createLead(leadData, user) {
       contact_person_name,
       contact_person_email,
       contact_person_phone,
+      enquiry_date,
+      priority,
+      industry_type,
       quotation,
       lead_source,
       lead_status,
       requirements_summary,
       assigned_to,
       raw_data
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     RETURNING ${LEAD_COLUMNS}`,
     values,
   );
@@ -536,8 +566,8 @@ async function updateLead(id, leadData, user) {
   const values = leadValues(leadData);
   await ensureLeadStatusAllowed({
     ...previous,
-    quotation: values[4] || previous.quotation,
-  }, values[6]);
+    quotation: values[7] || previous.quotation,
+  }, values[9]);
 
   const result = await pool.query(
     `UPDATE leads
@@ -545,13 +575,16 @@ async function updateLead(id, leadData, user) {
          contact_person_name = $2,
          contact_person_email = $3,
          contact_person_phone = $4,
-         quotation = $5,
-         lead_source = $6,
-         lead_status = $7,
-         requirements_summary = $8,
-         assigned_to = $9,
-         raw_data = $10
-     WHERE id = $11
+         enquiry_date = $5,
+         priority = $6,
+         industry_type = $7,
+         quotation = $8,
+         lead_source = $9,
+         lead_status = $10,
+         requirements_summary = $11,
+         assigned_to = $12,
+         raw_data = $13
+     WHERE id = $14
      RETURNING ${LEAD_COLUMNS}`,
     [...values, id],
   );

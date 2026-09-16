@@ -6,6 +6,9 @@ const CUSTOMER_COLUMNS = `
   company_name,
   gstin,
   city,
+  company_type,
+  industry,
+  company_site,
   contact_person_name,
   contact_person_phone,
   amc_status,
@@ -100,6 +103,9 @@ function customerValues(customerData) {
     requiredString(customerData.company_name, 'Company name', 255),
     nullableGstin(customerData.gstin, 'GSTIN'),
     nullableString(customerData.city, 'City', 255),
+    nullableString(customerData.company_type, 'Company type', 100),
+    nullableString(customerData.industry, 'Industry', 100),
+    nullableString(customerData.company_site, 'Company site', 255),
     nullableString(customerData.contact_person_name, 'Contact person name', 255),
     nullablePhone(customerData.contact_person_phone, 'Contact person phone'),
     amcStatus,
@@ -125,6 +131,9 @@ async function createCustomer(customerData) {
       company_name,
       gstin,
       city,
+      company_type,
+      industry,
+      company_site,
       contact_person_name,
       contact_person_phone,
       amc_status,
@@ -132,7 +141,7 @@ async function createCustomer(customerData) {
       lifetime_value,
       customer_since,
       raw_data
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::date, CURRENT_DATE), $10)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12::date, CURRENT_DATE), $13)
     RETURNING ${CUSTOMER_COLUMNS}`,
     customerValues(customerData),
   );
@@ -146,15 +155,18 @@ async function updateCustomer(id, customerData) {
      SET company_name = $1,
          gstin = $2,
          city = $3,
-         contact_person_name = $4,
-         contact_person_phone = $5,
-         amc_status = $6,
-         total_orders = $7,
-         lifetime_value = $8,
-         customer_since = COALESCE($9::date, customer_since),
-         raw_data = $10,
+         company_type = $4,
+         industry = $5,
+         company_site = $6,
+         contact_person_name = $7,
+         contact_person_phone = $8,
+         amc_status = $9,
+         total_orders = $10,
+         lifetime_value = $11,
+         customer_since = COALESCE($12::date, customer_since),
+         raw_data = $13,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $11
+     WHERE id = $14
      RETURNING ${CUSTOMER_COLUMNS}`,
     [...customerValues(customerData), id],
   );
@@ -190,7 +202,7 @@ async function convertLeadToCustomer(leadId, user) {
     await client.query('BEGIN');
 
     const leadResult = await client.query(
-      `SELECT id, company_name, contact_person_name, contact_person_phone
+      `SELECT id, company_name, contact_person_name, contact_person_phone, industry_type
        FROM leads
        WHERE id = $1
        FOR SHARE`,
@@ -226,15 +238,17 @@ async function convertLeadToCustomer(leadId, user) {
     const customerResult = await client.query(
       `INSERT INTO customers (
         company_name,
+        industry,
         contact_person_name,
         contact_person_phone,
         amc_status,
         customer_since,
         source_lead_id
-      ) VALUES ($1, $2, $3, 'None', CURRENT_DATE, $4)
+      ) VALUES ($1, $2, $3, $4, 'None', CURRENT_DATE, $5)
       RETURNING ${CUSTOMER_COLUMNS}`,
       [
         lead.company_name,
+        lead.industry_type || null,
         lead.contact_person_name || null,
         lead.contact_person_phone || null,
         lead.id,

@@ -9,6 +9,10 @@ async function createLeadSchema() {
       contact_person_name VARCHAR(255) NOT NULL,
       contact_person_email VARCHAR(255) NOT NULL,
       contact_person_phone VARCHAR(20) NOT NULL,
+      enquiry_date DATE NOT NULL,
+      priority VARCHAR(20) NOT NULL DEFAULT 'Medium'
+        CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
+      industry_type VARCHAR(100),
       quotation VARCHAR(255),
       lead_source VARCHAR(255) NOT NULL,
       lead_status VARCHAR(50) NOT NULL,
@@ -22,7 +26,10 @@ async function createLeadSchema() {
   // CREATE TABLE IF NOT EXISTS does not add columns to an existing table.
   await pool.query(`
     ALTER TABLE leads
-    ADD COLUMN IF NOT EXISTS quotation VARCHAR(255);
+    ADD COLUMN IF NOT EXISTS quotation VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS enquiry_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'Medium',
+    ADD COLUMN IF NOT EXISTS industry_type VARCHAR(100);
   `);
 
   console.log('Lead schema created successfully.');
@@ -108,6 +115,9 @@ async function createCustomerSchema() {
       company_name VARCHAR(255) NOT NULL,
       gstin VARCHAR(20),
       city VARCHAR(255),
+      company_type VARCHAR(100),
+      industry VARCHAR(100),
+      company_site VARCHAR(255),
       contact_person_name VARCHAR(255),
       contact_person_phone VARCHAR(20),
       amc_status VARCHAR(20) NOT NULL DEFAULT 'None'
@@ -122,6 +132,13 @@ async function createCustomerSchema() {
       source_lead_id INTEGER,
       raw_data JSONB
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS company_type VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS industry VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS company_site VARCHAR(255);
   `);
 
   await pool.query(`
@@ -419,6 +436,30 @@ async function createHandoverProjectSchema() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS project_stage_tasks (
+      id SERIAL PRIMARY KEY,
+      project_id INTEGER NOT NULL,
+      stage_number INTEGER NOT NULL,
+      stage_key VARCHAR(80) NOT NULL,
+      stage_name VARCHAR(255) NOT NULL,
+      department VARCHAR(100),
+      description TEXT,
+      sequence_index INTEGER NOT NULL,
+      status VARCHAR(30) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'in_progress', 'completed', 'blocked', 'skipped')),
+      checklist JSONB NOT NULL DEFAULT '[]'::jsonb,
+      notes TEXT,
+      assigned_to VARCHAR(255),
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ,
+      completed_by VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (project_id, stage_key)
+    );
+  `);
+
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS handovers_quotation_idx
     ON crm_erp_handovers (quotation_id);
   `);
@@ -461,6 +502,16 @@ async function createHandoverProjectSchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS projects_status_idx
     ON projects (status, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS project_stage_tasks_project_idx
+    ON project_stage_tasks (project_id, sequence_index);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS project_stage_tasks_status_idx
+    ON project_stage_tasks (status, stage_number);
   `);
 
   console.log('Handover and project schema created successfully.');

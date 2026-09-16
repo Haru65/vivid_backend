@@ -1,4 +1,5 @@
 const pool = require('../config/db_connection');
+const { getProjectWorkflow, seedProjectWorkflow } = require('./projectWorkflowService');
 
 function appError(message, statusCode = 400) {
   const error = new Error(message);
@@ -68,15 +69,35 @@ async function createProjectFromHandover(client, handover, user, data = {}) {
       user?.role || null,
     ],
   );
-  return result.rows[0];
+  const project = result.rows[0];
+  await seedProjectWorkflow(project.id, client);
+  return project;
 }
 
 async function listProjects(user) {
   const result = await pool.query(
-    `SELECT p.*, h.handover_number, c.company_name
+    `SELECT p.*, h.handover_number, c.company_name,
+       COUNT(pst.id)::int AS workflow_stage_count,
+       COUNT(pst.id) FILTER (WHERE pst.status = 'completed')::int AS completed_stage_count,
+       (
+         SELECT json_build_object(
+           'stage_number', current_stage.stage_number,
+           'stage_key', current_stage.stage_key,
+           'stage_name', current_stage.stage_name,
+           'department', current_stage.department,
+           'status', current_stage.status
+         )
+         FROM project_stage_tasks current_stage
+         WHERE current_stage.project_id = p.id
+           AND current_stage.status <> 'completed'
+         ORDER BY current_stage.sequence_index ASC
+         LIMIT 1
+       ) AS current_workflow_stage
      FROM projects p
      LEFT JOIN crm_erp_handovers h ON h.id = p.handover_id
      LEFT JOIN customers c ON c.id = p.customer_id
+     LEFT JOIN project_stage_tasks pst ON pst.project_id = p.id
+     GROUP BY p.id, h.handover_number, c.company_name
      ORDER BY p.created_at DESC, p.id DESC`,
   );
   return result.rows;
@@ -93,12 +114,29 @@ async function getProject(id, user) {
   );
   const project = result.rows[0];
   if (!project) throw appError('Project not found.', 404);
-  return project;
+  return {
+    ...project,
+    workflow: await getProjectWorkflow(project.id),
+  };
+}
+
+async function ensureProjectWorkflow(id, user) {
+  const project = await getProject(id, user);
+  if (project.workflow.length) return project.workflow;
+  return seedProjectWorkflow(project.id);
+}
+
+async function getWorkflowForProject(id, user) {
+  const project = await getProject(id, user);
+  if (project.workflow.length) return project.workflow;
+  return seedProjectWorkflow(project.id);
 }
 
 module.exports = {
   createProjectFromHandover,
+  ensureProjectWorkflow,
   generateProjectNumber,
   getProject,
+  getWorkflowForProject,
   listProjects,
 };
