@@ -1,5 +1,5 @@
 const pool = require('../config/db_connection');
-const { getProjectWorkflow, seedProjectWorkflow } = require('./projectWorkflowService');
+const { seedProjectWorkflow } = require('./projectWorkflowService');
 
 function appError(message, statusCode = 400) {
   const error = new Error(message);
@@ -75,10 +75,40 @@ async function createProjectFromHandover(client, handover, user, data = {}) {
 }
 
 async function listProjects(user) {
+  const projectIds = await pool.query('SELECT id FROM projects');
+  for (const project of projectIds.rows) {
+    await seedProjectWorkflow(project.id);
+  }
+
   const result = await pool.query(
     `SELECT p.*, h.handover_number, c.company_name,
        COUNT(pst.id)::int AS workflow_stage_count,
        COUNT(pst.id) FILTER (WHERE pst.status = 'completed')::int AS completed_stage_count,
+       COALESCE(
+         json_agg(
+           json_build_object(
+             'id', pst.id,
+             'project_id', pst.project_id,
+             'stage_number', pst.stage_number,
+             'stage_key', pst.stage_key,
+             'stage_name', pst.stage_name,
+             'department', pst.department,
+             'description', pst.description,
+             'sequence_index', pst.sequence_index,
+             'status', pst.status,
+             'checklist', pst.checklist,
+             'notes', pst.notes,
+             'assigned_to', pst.assigned_to,
+             'started_at', pst.started_at,
+             'completed_at', pst.completed_at,
+             'completed_by', pst.completed_by,
+             'created_at', pst.created_at,
+             'updated_at', pst.updated_at
+           )
+           ORDER BY pst.sequence_index ASC, pst.stage_number ASC
+         ) FILTER (WHERE pst.id IS NOT NULL),
+         '[]'::json
+       ) AS workflow_summary,
        (
          SELECT json_build_object(
            'stage_number', current_stage.stage_number,
@@ -89,7 +119,7 @@ async function listProjects(user) {
          )
          FROM project_stage_tasks current_stage
          WHERE current_stage.project_id = p.id
-           AND current_stage.status <> 'completed'
+           AND current_stage.status NOT IN ('completed', 'skipped')
          ORDER BY current_stage.sequence_index ASC
          LIMIT 1
        ) AS current_workflow_stage
@@ -116,19 +146,17 @@ async function getProject(id, user) {
   if (!project) throw appError('Project not found.', 404);
   return {
     ...project,
-    workflow: await getProjectWorkflow(project.id),
+    workflow: await seedProjectWorkflow(project.id),
   };
 }
 
 async function ensureProjectWorkflow(id, user) {
   const project = await getProject(id, user);
-  if (project.workflow.length) return project.workflow;
   return seedProjectWorkflow(project.id);
 }
 
 async function getWorkflowForProject(id, user) {
   const project = await getProject(id, user);
-  if (project.workflow.length) return project.workflow;
   return seedProjectWorkflow(project.id);
 }
 

@@ -301,7 +301,17 @@ async function updateProjectWorkflowStage(projectId, stageId, data = {}, user, d
 }
 
 async function completeProjectWorkflowStage(projectId, stageId, user, db = pool) {
-  const stage = await updateProjectWorkflowStage(projectId, stageId, { status: 'completed' }, user, db);
+  const result = await db.query(
+    `SELECT checklist
+     FROM project_stage_tasks
+     WHERE project_id = $1
+       AND id = $2`,
+    [projectId, stageId],
+  );
+  const checklist = Array.isArray(result.rows[0]?.checklist)
+    ? result.rows[0].checklist.map((item) => ({ ...item, completed: true }))
+    : undefined;
+  const stage = await updateProjectWorkflowStage(projectId, stageId, { status: 'completed', checklist }, user, db);
   return stage;
 }
 

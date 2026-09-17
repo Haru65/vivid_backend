@@ -244,7 +244,7 @@ function normalizeLineItems(items) {
 function normalizedValues(data, taxSettings = { gst_rate: 18 }) {
   const lineItems = normalizeLineItems(data.line_items);
   const subtotal = Number(lineItems.reduce((sum, item) => sum + item.amount, 0).toFixed(2));
-  const gstRate = nonNegativeNumber(data.gst_rate, 'GST rate', taxSettings.gst_rate);
+  const gstRate = nonNegativeNumber(taxSettings.gst_rate, 'GST rate', 18);
   if (gstRate > 100) throw validationError('GST rate cannot exceed 100%.');
   const discountPercent = nonNegativeNumber(data.discount_percent, 'Discount', 0);
   if (discountPercent > 100) throw validationError('Discount cannot exceed 100%.');
@@ -482,7 +482,8 @@ async function updateQuotation(id, data, user) {
   const existing = existingResult.rows[0];
   if (!existing) return null;
 
-  const values = normalizedValues(data);
+  const taxSettings = await getTaxSettings();
+  const values = normalizedValues(data, taxSettings);
   const result = await pool.query(
     `UPDATE quotations
      SET lead_id = $1,
