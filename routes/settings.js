@@ -1,5 +1,10 @@
 const express = require('express');
-const { getTaxSettings, updateTaxSettings } = require('../controller/settings');
+const {
+  getMasterSettings,
+  getTaxSettings,
+  updateMasterSettings,
+  updateTaxSettings,
+} = require('../controller/settings');
 const { optionalUser } = require('../middleware/auth');
 
 const router = express.Router();
@@ -28,6 +33,22 @@ router.put('/tax', async (req, res) => {
     res.json(await updateTaxSettings(req.body, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to update tax settings', error);
+  }
+});
+
+router.get('/masters', async (req, res) => {
+  try {
+    res.json(await getMasterSettings());
+  } catch (error) {
+    handleError(res, 'Unable to retrieve masters', error);
+  }
+});
+
+router.put('/masters', async (req, res) => {
+  try {
+    res.json(await updateMasterSettings(req.body, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to update masters', error);
   }
 });
 
