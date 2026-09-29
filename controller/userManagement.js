@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const pool = require('../config/db_connection');
 
-const USER_ROLES = new Set(['admin', 'salesperson', 'erp']);
+const USER_ROLES = new Set(['admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp']);
 const PASSWORD_HASH_PREFIX = 'pbkdf2';
 const PASSWORD_ITERATIONS = 120000;
 const PASSWORD_KEY_LENGTH = 64;
@@ -15,7 +15,7 @@ function appError(message, statusCode = 400) {
 
 function normalizeRole(role) {
   const value = String(role || '').trim().toLowerCase();
-  if (!USER_ROLES.has(value)) throw appError('User role must be admin, salesperson, or erp.');
+  if (!USER_ROLES.has(value)) throw appError('User role must be admin, salesperson, sales_head, sales_engineer, estimation_head, estimation_engineer, or erp.');
   return value;
 }
 
@@ -95,7 +95,7 @@ async function createUserSchema() {
       email VARCHAR(255) UNIQUE NOT NULL,
       phone VARCHAR(20),
       password_hash TEXT NOT NULL,
-      role VARCHAR(100) NOT NULL CHECK (role IN ('admin', 'salesperson', 'erp')),
+      role VARCHAR(100) NOT NULL CHECK (role IN ('admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp')),
       department VARCHAR(100),
       designation VARCHAR(150),
       employee_code VARCHAR(50) UNIQUE,
@@ -105,6 +105,18 @@ async function createUserSchema() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  await pool.query(`
+    ALTER TABLE users
+    DROP CONSTRAINT IF EXISTS users_role_check;
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD CONSTRAINT users_role_check
+    CHECK (role IN ('admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp'));
+  `);
+
 
   const count = await pool.query('SELECT COUNT(*)::int AS count FROM users');
   if (count.rows[0].count === 0) {
@@ -151,7 +163,7 @@ async function listUsers(actor) {
 async function listApprovalUsers() {
   const result = await pool.query(
     `${userSelect('WHERE is_active = TRUE')}
-     ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'salesperson' THEN 1 ELSE 2 END,
+     ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'sales_head' THEN 1 WHEN 'estimation_head' THEN 2 WHEN 'salesperson' THEN 3 WHEN 'sales_engineer' THEN 4 WHEN 'estimation_engineer' THEN 5 ELSE 6 END,
        first_name ASC, last_name ASC, id ASC`,
   );
   return result.rows.map((row) => {

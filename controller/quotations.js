@@ -44,6 +44,10 @@ const QUOTATION_COLUMNS = `
   is_current_revision,
   revision_reason,
   negotiation_notes,
+  estimation_request_id,
+  prepared_by_user_id,
+  reviewed_by_user_id,
+  sent_by_user_id,
   created_at,
   updated_at
 `;
@@ -288,9 +292,58 @@ function normalizedValues(data, taxSettings = { gst_rate: 18 }) {
   };
 }
 
-async function retrieveQuotations() {
+function roleOf(user) {
+  return String(user?.role || '').trim().toLowerCase();
+}
+
+function nameOf(user) {
+  return String(user?.name || '').trim();
+}
+
+function quotationVisibilityFilter(user, startIndex = 1) {
+  const role = roleOf(user);
+  if (['admin', 'estimation_head', 'sales_head'].includes(role)) {
+    return { clause: '', params: [] };
+  }
+  if (role === 'estimation_engineer') {
+    return {
+      clause: `WHERE (
+        quotations.prepared_by_user_id = $${startIndex}
+        OR EXISTS (
+          SELECT 1 FROM estimation_requests er
+          WHERE er.id = quotations.estimation_request_id
+            AND er.assigned_engineer_id = $${startIndex}
+        )
+      )`,
+      params: [user?.id || null],
+    };
+  }
+  if (['sales_engineer', 'salesperson'].includes(role)) {
+    return {
+      clause: `WHERE EXISTS (
+        SELECT 1
+        FROM leads l
+        LEFT JOIN estimation_requests er ON er.id = quotations.estimation_request_id
+        WHERE l.id = quotations.lead_id
+          AND (
+            l.assigned_to = $${startIndex}
+            OR er.sales_owner_id = $${startIndex + 1}
+            OR er.requested_by_user_id = $${startIndex + 1}
+            OR er.sales_owner_name = $${startIndex}
+            OR er.requested_by_name = $${startIndex}
+          )
+      )`,
+      params: [nameOf(user), user?.id || null],
+    };
+  }
+  return { clause: 'WHERE FALSE', params: [] };
+}
+
+async function retrieveQuotations(user = {}) {
+  const visibility = quotationVisibilityFilter(user);
   const result = await pool.query(
     `SELECT ${QUOTATION_COLUMNS},
+       (SELECT er.status FROM estimation_requests er WHERE er.id = quotations.estimation_request_id) AS estimation_status,
        COALESCE((
          SELECT json_agg(json_build_object(
            'id', n.id,
@@ -329,7 +382,9 @@ async function retrieveQuotations() {
          LIMIT 1
        ) AS erp_handover
      FROM quotations
+     ${visibility.clause}
      ORDER BY created_at DESC, id DESC`,
+    visibility.params,
   );
   return result.rows;
 }
@@ -762,8 +817,10 @@ async function createQuotationRevision(id, data = {}, user) {
         parent_quotation_id,
         is_current_revision,
         revision_reason,
-        negotiation_notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NULL, $28, 'Draft', $29, $30, $31, $32, TRUE, $33, $34)
+        negotiation_notes,
+        estimation_request_id,
+        prepared_by_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NULL, $28, 'Draft', $29, $30, $31, $32, TRUE, $33, $34, $35, $36)
       RETURNING ${QUOTATION_COLUMNS}`,
       [
         quotationNumber,
@@ -800,6 +857,8 @@ async function createQuotationRevision(id, data = {}, user) {
         source.id,
         revisionReason,
         negotiationNotes,
+        source.estimation_request_id,
+        source.prepared_by_user_id,
       ],
     );
 
@@ -850,6 +909,17 @@ async function sendQuotation(id, user) {
       error.statusCode = 400;
       throw error;
     }
+    if (quotation.estimation_request_id) {
+      const estimationResult = await client.query(
+        `SELECT status FROM estimation_requests WHERE id = $1`,
+        [quotation.estimation_request_id],
+      );
+      if (!['returned_to_sales', 'submitted_for_review', 'revision_submitted_for_review'].includes(estimationResult.rows[0]?.status)) {
+        const error = new Error('Estimation quotation must be sent back to sales before sending to client.');
+        error.statusCode = 400;
+        throw error;
+      }
+    }
 
     emailResult = await sendQuotationEmail(quotation, user);
 
@@ -898,6 +968,21 @@ async function sendQuotation(id, user) {
        WHERE id = $2`,
       [quotation.quotation_number, quotation.lead_id, quotation.revision_number || 0],
     );
+
+    if (quotation.estimation_request_id) {
+      await client.query(
+        `UPDATE estimation_requests
+         SET status = 'sent_to_client',
+             sent_to_client_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [quotation.estimation_request_id],
+      );
+      await client.query(
+        `UPDATE quotations SET sent_by_user_id = $1 WHERE id = $2`,
+        [user?.id || null, id],
+      );
+    }
 
     updatedQuotation = updatedResult.rows[0];
 

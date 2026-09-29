@@ -46,7 +46,7 @@ function optionalUser(req) {
   if (req.user) return req.user;
   const role = String(req.get('x-user-role') || 'salesperson').trim().toLowerCase();
   return {
-    role: ['admin', 'salesperson', 'erp'].includes(role) ? role : 'salesperson',
+    role: ['admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp'].includes(role) ? role : 'sales_engineer',
     name: String(req.get('x-user-name') || 'Workspace user').trim() || 'Workspace user',
   };
 }

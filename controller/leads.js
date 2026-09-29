@@ -8,6 +8,12 @@ const LEAD_COLUMNS = `
   contact_person_phone,
   enquiry_date,
   priority,
+  customer_id,
+  segment,
+  site_location,
+  consultant,
+  enquiry_product,
+  enquiry_notes,
   industry_type,
   quotation,
   lead_source,
@@ -26,6 +32,12 @@ const LEAD_TABLE_COLUMNS = `
   l.contact_person_phone,
   l.enquiry_date,
   l.priority,
+  l.customer_id,
+  l.segment,
+  l.site_location,
+  l.consultant,
+  l.enquiry_product,
+  l.enquiry_notes,
   l.industry_type,
   l.quotation,
   l.lead_source,
@@ -254,6 +266,11 @@ function leadUpdateActivities(previous, next) {
     ['contact_person_phone', 'contact phone'],
     ['enquiry_date', 'enquiry date'],
     ['priority', 'priority'],
+    ['segment', 'segment'],
+    ['site_location', 'site location'],
+    ['consultant', 'consultant'],
+    ['enquiry_product', 'enquiry product'],
+    ['enquiry_notes', 'enquiry notes'],
     ['industry_type', 'industry type'],
     ['quotation', 'quotation reference'],
     ['lead_source', 'lead source'],
@@ -278,6 +295,11 @@ function leadValues(leadData) {
     phone(leadData.contact_person_phone, 'Contact phone', true),
     dateOnly(leadData.enquiry_date, 'Enquiry date', true),
     priority,
+    text(leadData.segment, 'Segment', 100),
+    text(leadData.site_location, 'Site location', 255),
+    text(leadData.consultant, 'Consultant', 255),
+    text(leadData.enquiry_product, 'Enquiry product', 100),
+    text(leadData.enquiry_notes, 'Enquiry notes', 5000),
     text(leadData.industry_type, 'Industry type', 100),
     text(leadData.quotation, 'Quotation reference', 255),
     text(leadData.lead_source, 'Lead source', 255, true),
@@ -519,35 +541,131 @@ async function cancelLeadFollowup(leadId, followupId, user) {
   return followup;
 }
 
+async function ensureCustomerForLead(client, lead) {
+  const existingResult = await client.query(
+    `SELECT id, company_name
+     FROM customers
+     WHERE source_lead_id = $1
+        OR LOWER(company_name) = LOWER($2)
+        OR (contact_person_phone IS NOT NULL AND contact_person_phone = $3)
+        OR (raw_data->>'contact_person_email' IS NOT NULL AND LOWER(raw_data->>'contact_person_email') = LOWER($4))
+     ORDER BY CASE
+       WHEN source_lead_id = $1 THEN 0
+       WHEN LOWER(company_name) = LOWER($2) THEN 1
+       WHEN contact_person_phone = $3 THEN 2
+       ELSE 3
+     END, id
+     LIMIT 1`,
+    [lead.id, lead.company_name, lead.contact_person_phone, lead.contact_person_email],
+  );
+
+  if (existingResult.rows[0]) {
+    await client.query(
+      `UPDATE customers
+       SET segment = COALESCE(segment, $2),
+           site_location = COALESCE(site_location, $3),
+           consultant = COALESCE(consultant, $4),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [existingResult.rows[0].id, lead.segment || null, lead.site_location || null, lead.consultant || null],
+    );
+    await client.query(
+      `UPDATE leads SET customer_id = $1 WHERE id = $2`,
+      [existingResult.rows[0].id, lead.id],
+    );
+    return { customer: existingResult.rows[0], created: false };
+  }
+
+  const customerResult = await client.query(
+    `INSERT INTO customers (
+      company_name,
+      industry,
+      segment,
+      site_location,
+      consultant,
+      contact_person_name,
+      contact_person_phone,
+      amc_status,
+      customer_since,
+      source_lead_id,
+      raw_data
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'None', CURRENT_DATE, $8, $9)
+    RETURNING id, company_name`,
+    [
+      lead.company_name,
+      lead.industry_type || null,
+      lead.segment || null,
+      lead.site_location || null,
+      lead.consultant || null,
+      lead.contact_person_name || null,
+      lead.contact_person_phone || null,
+      lead.id,
+      { contact_person_email: lead.contact_person_email },
+    ],
+  );
+
+  await client.query(
+    `UPDATE leads SET customer_id = $1 WHERE id = $2`,
+    [customerResult.rows[0].id, lead.id],
+  );
+
+  return { customer: customerResult.rows[0], created: true };
+}
+
 async function createLead(leadData, user) {
   const values = leadValues(leadData);
-  if (QUOTATION_REQUIRED_STATUSES.has(values[9])) {
-    throw validationError(`Create the lead and send a quotation before moving it to ${values[9]}.`);
+  if (QUOTATION_REQUIRED_STATUSES.has(values[13])) {
+    throw validationError(`Create the lead and send a quotation before moving it to ${values[13]}.`);
   }
-  const result = await pool.query(
-    `INSERT INTO leads (
-      company_name,
-      contact_person_name,
-      contact_person_email,
-      contact_person_phone,
-      enquiry_date,
-      priority,
-      industry_type,
-      quotation,
-      lead_source,
-      lead_status,
-      requirements_summary,
-      assigned_to,
-      raw_data
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-    RETURNING ${LEAD_COLUMNS}`,
-    values,
-  );
-  const lead = result.rows[0];
+
+  const client = await pool.connect();
+  let lead;
+  let customerState;
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `INSERT INTO leads (
+        company_name,
+        contact_person_name,
+        contact_person_email,
+        contact_person_phone,
+        enquiry_date,
+        priority,
+        segment,
+        site_location,
+        consultant,
+        enquiry_product,
+        enquiry_notes,
+        industry_type,
+        quotation,
+        lead_source,
+        lead_status,
+        requirements_summary,
+        assigned_to,
+        raw_data
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+      RETURNING ${LEAD_COLUMNS}`,
+      values,
+    );
+    lead = result.rows[0];
+    customerState = await ensureCustomerForLead(client, lead);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 
   await logLeadActivity(lead.id, {
     activity_type: 'system',
     content: `Lead created for ${lead.company_name}`,
+  }, user);
+  await logLeadActivity(lead.id, {
+    activity_type: 'system',
+    content: customerState.created
+      ? `Customer account created for ${customerState.customer.company_name}`
+      : `Customer account linked to existing ${customerState.customer.company_name}`,
   }, user);
 
   return (await retrieveLead(lead.id)) || lead;
@@ -566,8 +684,8 @@ async function updateLead(id, leadData, user) {
   const values = leadValues(leadData);
   await ensureLeadStatusAllowed({
     ...previous,
-    quotation: values[7] || previous.quotation,
-  }, values[9]);
+    quotation: values[11] || previous.quotation,
+  }, values[13]);
 
   const result = await pool.query(
     `UPDATE leads
@@ -577,14 +695,19 @@ async function updateLead(id, leadData, user) {
          contact_person_phone = $4,
          enquiry_date = $5,
          priority = $6,
-         industry_type = $7,
-         quotation = $8,
-         lead_source = $9,
-         lead_status = $10,
-         requirements_summary = $11,
-         assigned_to = $12,
-         raw_data = $13
-     WHERE id = $14
+         segment = $7,
+         site_location = $8,
+         consultant = $9,
+         enquiry_product = $10,
+         enquiry_notes = $11,
+         industry_type = $12,
+         quotation = $13,
+         lead_source = $14,
+         lead_status = $15,
+         requirements_summary = $16,
+         assigned_to = $17,
+         raw_data = $18
+     WHERE id = $19
      RETURNING ${LEAD_COLUMNS}`,
     [...values, id],
   );

@@ -3,8 +3,13 @@ const { createUserSchema } = require('../controller/userManagement');
 
 async function createLeadSchema() {
   await pool.query(`
+    CREATE SEQUENCE IF NOT EXISTS enquiry_number_seq;
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS leads (
       id SERIAL PRIMARY KEY,
+      enquiry_number VARCHAR(50) UNIQUE,
       company_name VARCHAR(255) NOT NULL,
       contact_person_name VARCHAR(255) NOT NULL,
       contact_person_email VARCHAR(255) NOT NULL,
@@ -12,13 +17,24 @@ async function createLeadSchema() {
       enquiry_date DATE NOT NULL,
       priority VARCHAR(20) NOT NULL DEFAULT 'Medium'
         CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
+      customer_id INTEGER,
+      segment VARCHAR(100),
+      site_location VARCHAR(255),
+      consultant VARCHAR(255),
+      enquiry_product VARCHAR(100),
+      enquiry_notes TEXT,
       industry_type VARCHAR(100),
       quotation VARCHAR(255),
       lead_source VARCHAR(255) NOT NULL,
       lead_status VARCHAR(50) NOT NULL,
       requirements_summary TEXT,
       assigned_to VARCHAR(255),
+      sales_owner_id BIGINT,
+      current_stage VARCHAR(50) NOT NULL DEFAULT 'enquiry',
+      current_assignee_id BIGINT,
+      current_department VARCHAR(100) NOT NULL DEFAULT 'Sales',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       raw_data JSONB
     );
   `);
@@ -29,7 +45,31 @@ async function createLeadSchema() {
     ADD COLUMN IF NOT EXISTS quotation VARCHAR(255),
     ADD COLUMN IF NOT EXISTS enquiry_date DATE NOT NULL DEFAULT CURRENT_DATE,
     ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'Medium',
-    ADD COLUMN IF NOT EXISTS industry_type VARCHAR(100);
+    ADD COLUMN IF NOT EXISTS customer_id INTEGER,
+    ADD COLUMN IF NOT EXISTS segment VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS site_location VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS consultant VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS enquiry_product VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS enquiry_notes TEXT,
+    ADD COLUMN IF NOT EXISTS industry_type VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS enquiry_number VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS sales_owner_id BIGINT,
+    ADD COLUMN IF NOT EXISTS current_stage VARCHAR(50) NOT NULL DEFAULT 'enquiry',
+    ADD COLUMN IF NOT EXISTS current_assignee_id BIGINT,
+    ADD COLUMN IF NOT EXISTS current_department VARCHAR(100) NOT NULL DEFAULT 'Sales',
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+  `);
+
+  await pool.query(`
+    UPDATE leads
+    SET enquiry_number = 'ENQ-' || TO_CHAR(COALESCE(enquiry_date, created_at::date, CURRENT_DATE), 'YYYY') || '-' || LPAD(id::text, 5, '0')
+    WHERE enquiry_number IS NULL;
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS leads_enquiry_number_idx ON leads (enquiry_number);
+    CREATE INDEX IF NOT EXISTS leads_customer_id_idx ON leads (customer_id);
+    CREATE INDEX IF NOT EXISTS leads_current_work_idx ON leads (current_assignee_id, current_stage, updated_at DESC);
   `);
 
   console.log('Lead schema created successfully.');
@@ -44,6 +84,7 @@ async function createLeadActivitySchema() {
         CHECK (activity_type IN ('note', 'call', 'whatsapp', 'system', 'email', 'meeting', 'negotiation', 'approval_requested', 'approval')),
       content TEXT NOT NULL,
       actor_name VARCHAR(255) NOT NULL,
+      actor_user_id BIGINT,
       metadata JSONB DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -51,7 +92,8 @@ async function createLeadActivitySchema() {
 
   await pool.query(`
     ALTER TABLE lead_activities
-    ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
+    ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS actor_user_id BIGINT;
   `);
 
   await pool.query(`
@@ -118,8 +160,15 @@ async function createCustomerSchema() {
       company_type VARCHAR(100),
       industry VARCHAR(100),
       company_site VARCHAR(255),
+      segment VARCHAR(100),
+      site_location VARCHAR(255),
+      consultant VARCHAR(255),
       contact_person_name VARCHAR(255),
       contact_person_phone VARCHAR(20),
+      contact_person_email VARCHAR(255),
+      billing_address TEXT,
+      shipping_address TEXT,
+      state VARCHAR(100),
       amc_status VARCHAR(20) NOT NULL DEFAULT 'None'
         CHECK (amc_status IN ('None', 'Active', 'Due', 'Expired')),
       total_orders INTEGER NOT NULL DEFAULT 0 CHECK (total_orders >= 0),
@@ -138,7 +187,14 @@ async function createCustomerSchema() {
     ALTER TABLE customers
     ADD COLUMN IF NOT EXISTS company_type VARCHAR(100),
     ADD COLUMN IF NOT EXISTS industry VARCHAR(100),
-    ADD COLUMN IF NOT EXISTS company_site VARCHAR(255);
+    ADD COLUMN IF NOT EXISTS company_site VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS segment VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS site_location VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS consultant VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS contact_person_email VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS billing_address TEXT,
+    ADD COLUMN IF NOT EXISTS shipping_address TEXT,
+    ADD COLUMN IF NOT EXISTS state VARCHAR(100);
   `);
 
   await pool.query(`
@@ -207,6 +263,18 @@ async function createQuotationSchema() {
       is_current_revision BOOLEAN NOT NULL DEFAULT TRUE,
       revision_reason TEXT,
       negotiation_notes TEXT,
+      estimation_request_id INTEGER,
+      boq_data JSONB NOT NULL DEFAULT '[]'::jsonb,
+      costing_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      total_internal_cost NUMERIC(14, 2),
+      selling_price NUMERIC(14, 2),
+      margin_percent NUMERIC(7, 2),
+      revision_type VARCHAR(50),
+      customer_request TEXT,
+      sales_notes TEXT,
+      prepared_by_user_id BIGINT,
+      reviewed_by_user_id BIGINT,
+      sent_by_user_id BIGINT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -220,6 +288,10 @@ async function createQuotationSchema() {
     ADD COLUMN IF NOT EXISTS is_current_revision BOOLEAN NOT NULL DEFAULT TRUE,
     ADD COLUMN IF NOT EXISTS revision_reason TEXT,
     ADD COLUMN IF NOT EXISTS negotiation_notes TEXT,
+    ADD COLUMN IF NOT EXISTS estimation_request_id INTEGER,
+    ADD COLUMN IF NOT EXISTS prepared_by_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS reviewed_by_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS sent_by_user_id BIGINT,
     ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(5, 2) NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS discount_amount NUMERIC(14, 2) NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS final_price NUMERIC(14, 2),
@@ -229,6 +301,18 @@ async function createQuotationSchema() {
     ADD COLUMN IF NOT EXISTS customer_po_number VARCHAR(100),
     ADD COLUMN IF NOT EXISTS customer_po_date DATE,
     ADD COLUMN IF NOT EXISTS order_confirmed_at TIMESTAMPTZ;
+  `);
+
+  await pool.query(`
+    ALTER TABLE quotations
+    ADD COLUMN IF NOT EXISTS boq_data JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN IF NOT EXISTS costing_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS total_internal_cost NUMERIC(14, 2),
+    ADD COLUMN IF NOT EXISTS selling_price NUMERIC(14, 2),
+    ADD COLUMN IF NOT EXISTS margin_percent NUMERIC(7, 2),
+    ADD COLUMN IF NOT EXISTS revision_type VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS customer_request TEXT,
+    ADD COLUMN IF NOT EXISTS sales_notes TEXT;
   `);
 
   await pool.query(`
@@ -517,6 +601,179 @@ async function createHandoverProjectSchema() {
   console.log('Handover and project schema created successfully.');
 }
 
+
+
+async function createNotificationSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_notifications (
+      id SERIAL PRIMARY KEY,
+      recipient_user_id BIGINT,
+      recipient_name VARCHAR(255),
+      title VARCHAR(255) NOT NULL,
+      body TEXT,
+      category VARCHAR(50) NOT NULL DEFAULT 'general',
+      link_type VARCHAR(50),
+      link_id INTEGER,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS user_notifications_recipient_idx
+    ON user_notifications (recipient_user_id, recipient_name, read_at, created_at DESC);
+  `);
+
+  console.log('Notification schema created successfully.');
+}
+
+async function createEstimationRequestSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS estimation_requests (
+      id SERIAL PRIMARY KEY,
+      lead_id INTEGER NOT NULL,
+      customer_id INTEGER,
+      quotation_id INTEGER,
+      requested_by_user_id BIGINT,
+      requested_by_name VARCHAR(255) NOT NULL,
+      sales_owner_id BIGINT,
+      sales_owner_name VARCHAR(255),
+      sales_head_id BIGINT,
+      estimation_head_id BIGINT,
+      estimation_head_name VARCHAR(255),
+      assigned_engineer_id BIGINT,
+      assigned_engineer_name VARCHAR(255),
+      current_stage VARCHAR(50) NOT NULL DEFAULT 'estimation_submitted',
+      current_assignee_id BIGINT,
+      status VARCHAR(50) NOT NULL DEFAULT 'submitted'
+        CHECK (status IN ('submitted', 'assigned', 'in_progress', 'submitted_for_review', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress', 'revision_submitted_for_review', 'approved', 'returned_to_sales', 'sent_to_client', 'client_approved', 'discarded', 'po_sales_draft', 'po_submitted_to_estimation', 'po_estimation_in_progress', 'po_submitted_to_head', 'po_approved_by_estimation_head', 'cancelled')),
+      segment VARCHAR(100),
+      site_location VARCHAR(255),
+      consultant VARCHAR(255),
+      enquiry_product VARCHAR(100),
+      enquiry_notes TEXT,
+      requirements_summary TEXT,
+      assignment_notes TEXT,
+      review_notes TEXT,
+      revision_notes TEXT,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      assigned_at TIMESTAMPTZ,
+      engineer_started_at TIMESTAMPTZ,
+      engineer_submitted_at TIMESTAMPTZ,
+      head_approved_at TIMESTAMPTZ,
+      returned_to_sales_at TIMESTAMPTZ,
+      sent_to_client_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    ALTER TABLE estimation_requests
+    ADD COLUMN IF NOT EXISTS customer_id INTEGER,
+    ADD COLUMN IF NOT EXISTS quotation_id INTEGER,
+    ADD COLUMN IF NOT EXISTS requested_by_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS sales_owner_id BIGINT,
+    ADD COLUMN IF NOT EXISTS sales_head_id BIGINT,
+    ADD COLUMN IF NOT EXISTS estimation_head_id BIGINT,
+    ADD COLUMN IF NOT EXISTS assignment_notes TEXT,
+    ADD COLUMN IF NOT EXISTS review_notes TEXT,
+    ADD COLUMN IF NOT EXISTS revision_notes TEXT,
+    ADD COLUMN IF NOT EXISTS current_stage VARCHAR(50) NOT NULL DEFAULT 'estimation_submitted',
+    ADD COLUMN IF NOT EXISTS current_assignee_id BIGINT;
+  `);
+
+
+
+  await pool.query(`
+    ALTER TABLE estimation_requests
+    DROP CONSTRAINT IF EXISTS estimation_requests_status_check;
+  `);
+
+  await pool.query(`
+    ALTER TABLE estimation_requests
+    ADD CONSTRAINT estimation_requests_status_check
+    CHECK (status IN ('submitted', 'assigned', 'in_progress', 'submitted_for_review', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress', 'revision_submitted_for_review', 'approved', 'returned_to_sales', 'sent_to_client', 'client_approved', 'discarded', 'po_sales_draft', 'po_submitted_to_estimation', 'po_estimation_in_progress', 'po_submitted_to_head', 'po_approved_by_estimation_head', 'cancelled'));
+  `);
+
+  await pool.query(`
+    ALTER TABLE estimation_requests
+    ADD COLUMN IF NOT EXISTS revision_requested_by VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS client_decision VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS discard_reason TEXT,
+    ADD COLUMN IF NOT EXISTS po_closure_sheet_id INTEGER;
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS estimation_requests_open_lead_idx
+    ON estimation_requests (lead_id)
+    WHERE status NOT IN ('cancelled', 'sent_to_client');
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS estimation_requests_status_idx
+    ON estimation_requests (status, updated_at DESC);
+  `);
+
+  console.log('Estimation request schema created successfully.');
+}
+
+
+async function createPoClosureSheetSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS po_closure_sheets (
+      id SERIAL PRIMARY KEY,
+      estimation_request_id INTEGER NOT NULL,
+      lead_id INTEGER NOT NULL,
+      quotation_id INTEGER,
+      customer_id INTEGER,
+      status VARCHAR(50) NOT NULL DEFAULT 'sales_draft'
+        CHECK (status IN ('sales_draft', 'submitted_to_estimation', 'estimation_in_progress', 'submitted_to_head', 'approved_by_estimation_head')),
+      sales_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      estimation_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      sales_submitted_by_user_id BIGINT,
+      sales_submitted_by_name VARCHAR(255),
+      sales_submitted_at TIMESTAMPTZ,
+      estimation_filled_by_user_id BIGINT,
+      estimation_filled_by_name VARCHAR(255),
+      estimation_filled_at TIMESTAMPTZ,
+      head_approved_by_user_id BIGINT,
+      head_approved_by_name VARCHAR(255),
+      head_approved_at TIMESTAMPTZ,
+      changes_requested_by_user_id BIGINT,
+      changes_requested_by_name VARCHAR(255),
+      changes_requested_at TIMESTAMPTZ,
+      changes_requested_reason TEXT,
+      ready_for_erp_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    ALTER TABLE po_closure_sheets
+    ADD COLUMN IF NOT EXISTS changes_requested_by_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS changes_requested_by_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS changes_requested_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS changes_requested_reason TEXT,
+    ADD COLUMN IF NOT EXISTS ready_for_erp_at TIMESTAMPTZ;
+  `);
+
+  await pool.query(`
+    ALTER TABLE po_closure_sheets DROP CONSTRAINT IF EXISTS po_closure_sheets_status_check;
+    ALTER TABLE po_closure_sheets ADD CONSTRAINT po_closure_sheets_status_check
+      CHECK (status IN ('sales_draft', 'submitted_to_estimation', 'estimation_in_progress', 'submitted_to_head', 'changes_requested', 'approved_by_estimation_head', 'ready_for_erp'));
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS po_closure_sheets_request_idx
+    ON po_closure_sheets (estimation_request_id);
+  `);
+
+  console.log('PO closure sheet schema created successfully.');
+}
+
 async function createMeetingSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS meetings (
@@ -591,7 +848,10 @@ async function createSchemas() {
   await createMeetingSchema();
   await createSettingsSchema();
   await createNegotiationApprovalSchema();
+  await createNotificationSchema();
+  await createEstimationRequestSchema();
+  await createPoClosureSheetSchema();
   await createHandoverProjectSchema();
 }
 
-module.exports = { createUserSchema, createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createMeetingSchema, createSettingsSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createSchemas };
+module.exports = { createUserSchema, createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createNotificationSchema, createEstimationRequestSchema, createPoClosureSheetSchema, createMeetingSchema, createSettingsSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createSchemas };

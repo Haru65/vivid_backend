@@ -9,6 +9,9 @@ const CUSTOMER_COLUMNS = `
   company_type,
   industry,
   company_site,
+  segment,
+  site_location,
+  consultant,
   contact_person_name,
   contact_person_phone,
   amc_status,
@@ -106,6 +109,9 @@ function customerValues(customerData) {
     nullableString(customerData.company_type, 'Company type', 100),
     nullableString(customerData.industry, 'Industry', 100),
     nullableString(customerData.company_site, 'Company site', 255),
+    nullableString(customerData.segment, 'Segment', 100),
+    nullableString(customerData.site_location, 'Site location', 255),
+    nullableString(customerData.consultant, 'Consultant', 255),
     nullableString(customerData.contact_person_name, 'Contact person name', 255),
     nullablePhone(customerData.contact_person_phone, 'Contact person phone'),
     amcStatus,
@@ -134,6 +140,9 @@ async function createCustomer(customerData) {
       company_type,
       industry,
       company_site,
+      segment,
+      site_location,
+      consultant,
       contact_person_name,
       contact_person_phone,
       amc_status,
@@ -141,7 +150,7 @@ async function createCustomer(customerData) {
       lifetime_value,
       customer_since,
       raw_data
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12::date, CURRENT_DATE), $13)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($15::date, CURRENT_DATE), $16)
     RETURNING ${CUSTOMER_COLUMNS}`,
     customerValues(customerData),
   );
@@ -158,15 +167,18 @@ async function updateCustomer(id, customerData) {
          company_type = $4,
          industry = $5,
          company_site = $6,
-         contact_person_name = $7,
-         contact_person_phone = $8,
-         amc_status = $9,
-         total_orders = $10,
-         lifetime_value = $11,
-         customer_since = COALESCE($12::date, customer_since),
-         raw_data = $13,
+         segment = $7,
+         site_location = $8,
+         consultant = $9,
+         contact_person_name = $10,
+         contact_person_phone = $11,
+         amc_status = $12,
+         total_orders = $13,
+         lifetime_value = $14,
+         customer_since = COALESCE($15::date, customer_since),
+         raw_data = $16,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $14
+     WHERE id = $17
      RETURNING ${CUSTOMER_COLUMNS}`,
     [...customerValues(customerData), id],
   );
@@ -202,7 +214,7 @@ async function convertLeadToCustomer(leadId, user) {
     await client.query('BEGIN');
 
     const leadResult = await client.query(
-      `SELECT id, company_name, contact_person_name, contact_person_phone, industry_type
+      `SELECT id, company_name, contact_person_name, contact_person_phone, industry_type, segment, site_location, consultant, customer_id
        FROM leads
        WHERE id = $1
        FOR SHARE`,
@@ -220,13 +232,15 @@ async function convertLeadToCustomer(leadId, user) {
       `SELECT ${CUSTOMER_COLUMNS}
        FROM customers
        WHERE source_lead_id = $1
+          OR id = $3
           OR LOWER(company_name) = LOWER($2)
-       ORDER BY CASE WHEN source_lead_id = $1 THEN 0 ELSE 1 END, id
+       ORDER BY CASE WHEN source_lead_id = $1 THEN 0 WHEN id = $3 THEN 1 ELSE 2 END, id
        LIMIT 1`,
-      [lead.id, lead.company_name],
+      [lead.id, lead.company_name, lead.customer_id],
     );
 
     if (existingResult.rows[0]) {
+      await client.query('UPDATE leads SET customer_id = $1 WHERE id = $2', [existingResult.rows[0].id, lead.id]);
       await client.query('COMMIT');
       await logLeadActivity(lead.id, {
         activity_type: 'system',
@@ -239,21 +253,29 @@ async function convertLeadToCustomer(leadId, user) {
       `INSERT INTO customers (
         company_name,
         industry,
+        segment,
+        site_location,
+        consultant,
         contact_person_name,
         contact_person_phone,
         amc_status,
         customer_since,
         source_lead_id
-      ) VALUES ($1, $2, $3, $4, 'None', CURRENT_DATE, $5)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'None', CURRENT_DATE, $8)
       RETURNING ${CUSTOMER_COLUMNS}`,
       [
         lead.company_name,
         lead.industry_type || null,
+        lead.segment || null,
+        lead.site_location || null,
+        lead.consultant || null,
         lead.contact_person_name || null,
         lead.contact_person_phone || null,
         lead.id,
       ],
     );
+
+    await client.query('UPDATE leads SET customer_id = $1 WHERE id = $2', [customerResult.rows[0].id, lead.id]);
 
     await client.query('COMMIT');
     await logLeadActivity(lead.id, {

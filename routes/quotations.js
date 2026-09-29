@@ -30,7 +30,7 @@ function handleError(res, message, error) {
 
 router.get('/', async (req, res) => {
   try {
-    res.json(await retrieveQuotations());
+    res.json(await retrieveQuotations(currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to retrieve quotations', error);
   }
