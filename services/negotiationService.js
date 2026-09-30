@@ -176,7 +176,7 @@ async function quotationForAccess(client, quotationId, user, lock = false) {
   );
   const quotation = result.rows[0];
   if (!quotation) throw appError('Quotation not found.', 404);
-  if (user?.role === 'salesperson' && quotation.assigned_to !== user.name) {
+  if (['salesperson', 'sales_engineer'].includes(user?.role) && quotation.assigned_to !== user.name) {
     throw appError('Salespersons can negotiate only their assigned lead quotations.', 403);
   }
   return quotation;

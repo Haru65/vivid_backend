@@ -8,9 +8,11 @@ const {
   completeProjectWorkflowStage,
   updateProjectWorkflowStage,
 } = require('../services/projectWorkflowService');
-const { optionalUser } = require('../middleware/auth');
+const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
+router.use(requireRoles('admin', 'erp'));
+
 
 function currentUser(req) {
   return optionalUser(req);

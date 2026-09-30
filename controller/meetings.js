@@ -96,7 +96,7 @@ async function leadForMeeting(leadId) {
 }
 
 function isAdmin(user) {
-  return user?.role === 'admin';
+  return ['admin', 'sales_head'].includes(user?.role);
 }
 
 function userCanAccessLead(lead, user) {

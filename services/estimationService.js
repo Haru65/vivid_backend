@@ -134,8 +134,8 @@ async function submitLeadToEstimation(leadId, user) {
   try {
     await client.query('BEGIN');
     const leadResult = await client.query(
-      `SELECT id, customer_id, company_name, assigned_to, segment, site_location, consultant,
-              enquiry_product, enquiry_notes, requirements_summary
+      `SELECT id, customer_id, company_name, assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, segment, site_location,
+              consultant, enquiry_product, enquiry_notes, requirements_summary
        FROM leads
        WHERE id = $1
        FOR UPDATE`,
@@ -143,7 +143,12 @@ async function submitLeadToEstimation(leadId, user) {
     );
     const lead = leadResult.rows[0];
     if (!lead) throw appError('Lead not found.', 404);
+    if (['salesperson', 'sales_engineer'].includes(user?.role)
+      && String(lead.sales_owner_id || '') !== String(user?.id || '')
+      && lead.assigned_to !== actorName(user)) {
+      throw appError('You can submit only leads assigned to you.', 403);
 
+    }
     const existing = await client.query(
       `SELECT id FROM estimation_requests
        WHERE lead_id = $1 AND status NOT IN ('cancelled', 'discarded')
@@ -165,13 +170,15 @@ async function submitLeadToEstimation(leadId, user) {
         lead_id, customer_id, requested_by_user_id, requested_by_name, sales_owner_id, sales_owner_name,
         estimation_head_id, estimation_head_name, status, segment, site_location, consultant,
         enquiry_product, enquiry_notes, requirements_summary
-      ) VALUES ($1, $2, $3, $4, $3, $4, $5, $6, 'submitted', $7, $8, $9, $10, $11, $12)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'submitted', $9, $10, $11, $12, $13, $14)
       RETURNING *`,
       [
         lead.id,
         lead.customer_id || null,
         user?.id || null,
         actorName(user),
+        lead.sales_owner_id || (['salesperson', 'sales_engineer'].includes(user?.role) ? user?.id : null),
+        lead.assigned_to || actorName(user),
         estimationHead?.id || null,
         headName,
         lead.segment || null,

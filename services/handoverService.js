@@ -22,7 +22,7 @@ function normalizeRole(role) {
 
 function requireSalesUser(user) {
   const role = normalizeRole(user?.role);
-  if (!['admin', 'salesperson'].includes(role)) {
+  if (!['admin', 'salesperson', 'sales_head', 'sales_engineer'].includes(role)) {
     throw appError('Only CRM sales users or admin can create and submit ERP handovers.', 403);
   }
 }
@@ -141,7 +141,7 @@ async function quotationBundle(client, quotationId, lock = false) {
 }
 
 function canAccessBundle(bundle, user) {
-  return normalizeRole(user?.role) !== 'salesperson' || bundle.assigned_to === user.name;
+  return !['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role)) || bundle.assigned_to === user.name;
 }
 
 async function checkHandoverEligibility({
@@ -433,7 +433,7 @@ async function listHandovers(user) {
   const role = normalizeRole(user?.role);
   const params = [];
   let where = '';
-  if (role === 'salesperson') {
+  if (['salesperson', 'sales_engineer'].includes(role)) {
     params.push(actorName(user));
     where = 'WHERE h.created_by_name = $1 OR l.assigned_to = $1';
   }
@@ -445,7 +445,7 @@ async function getHandover(id, user) {
   const result = await pool.query(handoverSelect('WHERE h.id = $1', ''), [id]);
   const handover = result.rows[0];
   if (!handover) throw appError('Handover not found.', 404);
-  if (normalizeRole(user?.role) === 'salesperson' && handover.created_by_name !== actorName(user) && handover.sales_owner !== actorName(user)) {
+  if (['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role)) && handover.created_by_name !== actorName(user) && handover.sales_owner !== actorName(user)) {
     throw appError('You can view only your own handovers.', 403);
   }
   return handover;

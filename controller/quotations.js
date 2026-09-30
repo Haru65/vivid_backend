@@ -338,6 +338,37 @@ function quotationVisibilityFilter(user, startIndex = 1) {
   }
   return { clause: 'WHERE FALSE', params: [] };
 }
+async function assertCanAccessQuotation(id, user) {
+  const visibility = quotationVisibilityFilter(user, 2);
+  const condition = visibility.clause ? visibility.clause.replace(/^WHERE/, 'AND') : '';
+  const result = await pool.query(
+    `SELECT quotations.id FROM quotations WHERE quotations.id = $1 ${condition}`,
+    [id, ...visibility.params],
+  );
+  if (!result.rows[0]) {
+    const error = new Error('Quotation not found or not available to this user.');
+    error.statusCode = 403;
+    throw error;
+  }
+  return result.rows[0];
+}
+
+async function assertCanPrepareQuotation(leadId, user) {
+  const role = roleOf(user);
+  if (['admin', 'estimation_head'].includes(role)) return;
+  if (role !== 'estimation_engineer') {
+    throw Object.assign(new Error('Only estimation users can prepare quotation drafts.'), { statusCode: 403 });
+  }
+  const result = await pool.query(
+    `SELECT 1 FROM estimation_requests
+     WHERE lead_id = $1
+       AND assigned_engineer_id = $2
+       AND status NOT IN ('cancelled', 'discarded')
+     LIMIT 1`,
+    [leadId, user?.id || null],
+  );
+  if (!result.rows[0]) throw Object.assign(new Error('This lead is not assigned to you for estimation.'), { statusCode: 403 });
+}
 
 async function retrieveQuotations(user = {}) {
   const visibility = quotationVisibilityFilter(user);
@@ -399,6 +430,7 @@ async function findLead(leadId) {
 }
 
 async function generateQuotationDocument(id, user) {
+  await assertCanAccessQuotation(id, user);
   const result = await pool.query(
     `SELECT ${QUOTATION_COLUMNS},
        (SELECT assigned_to FROM leads WHERE leads.id = quotations.lead_id) AS assigned_to
@@ -429,6 +461,7 @@ async function generateQuotationDocument(id, user) {
 async function createQuotation(data, user) {
   const taxSettings = await getTaxSettings();
   const values = normalizedValues(data, taxSettings);
+  await assertCanPrepareQuotation(values.leadId, user);
   const lead = await findLead(values.leadId);
   if (!lead) {
     const error = new Error('Lead not found');
@@ -528,6 +561,8 @@ async function createQuotation(data, user) {
 }
 
 async function updateQuotation(id, data, user) {
+  if (!['admin', 'estimation_head', 'estimation_engineer'].includes(roleOf(user))) throw Object.assign(new Error('Only estimation users can edit quotation drafts.'), { statusCode: 403 });
+  await assertCanAccessQuotation(id, user);
   const existingResult = await pool.query(
     `SELECT id, lead_id, quotation_number
      FROM quotations
@@ -539,6 +574,7 @@ async function updateQuotation(id, data, user) {
 
   const taxSettings = await getTaxSettings();
   const values = normalizedValues(data, taxSettings);
+  await assertCanPrepareQuotation(values.leadId, user);
   const result = await pool.query(
     `UPDATE quotations
      SET lead_id = $1,
@@ -633,6 +669,8 @@ async function updateQuotation(id, data, user) {
 }
 
 async function deleteQuotation(id, user) {
+  if (!['admin', 'estimation_head', 'estimation_engineer'].includes(roleOf(user))) throw Object.assign(new Error('Only estimation users can delete quotation drafts.'), { statusCode: 403 });
+  await assertCanAccessQuotation(id, user);
   const client = await pool.connect();
   let quotation = null;
   let restored = null;
@@ -713,6 +751,7 @@ async function createQuotationRevision(id, data = {}, user) {
   let revision = null;
   let source = null;
   try {
+  await assertCanAccessQuotation(id, user);
     await client.query('BEGIN');
     const sourceResult = await client.query(
       `SELECT ${QUOTATION_COLUMNS}
@@ -888,6 +927,8 @@ async function createQuotationRevision(id, data = {}, user) {
 }
 
 async function sendQuotation(id, user) {
+  if (!['admin', 'sales_head', 'sales_engineer', 'salesperson'].includes(roleOf(user))) throw Object.assign(new Error('Only sales users can send quotations to clients.'), { statusCode: 403 });
+  await assertCanAccessQuotation(id, user);
   const client = await pool.connect();
   let updatedQuotation = null;
   let supersededQuotations = [];

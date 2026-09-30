@@ -18,6 +18,7 @@ const LEAD_COLUMNS = `
   quotation,
   lead_source,
   lead_status,
+  NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
   requirements_summary,
   assigned_to,
   created_at,
@@ -42,6 +43,7 @@ const LEAD_TABLE_COLUMNS = `
   l.quotation,
   l.lead_source,
   l.lead_status,
+  NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
   l.requirements_summary,
   l.assigned_to,
   l.created_at,
@@ -105,6 +107,20 @@ function normalizeActivity(activityData = {}) {
 function actorName(user) {
   return user?.name || 'Workspace user';
 }
+function roleOf(user) {
+  return String(user?.role || '').trim().toLowerCase();
+}
+
+function isIndividualSales(user) {
+  return ['salesperson', 'sales_engineer'].includes(roleOf(user));
+}
+
+function canAccessLead(lead, user) {
+  if (!isIndividualSales(user)) return true;
+  return String(lead?.sales_owner_id || '') === String(user?.id || '')
+    || String(lead?.assigned_to || '').trim() === actorName(user);
+}
+
 
 function text(value, field, maxLength, required = false) {
   if (value === undefined || value === null) {
@@ -182,7 +198,7 @@ function normalizeFollowup(data = {}, fallbackAssignee) {
 
 async function leadForAccess(leadId, user) {
   const result = await pool.query(
-    'SELECT id, company_name, assigned_to FROM leads WHERE id = $1',
+    `SELECT id, company_name, assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id FROM leads WHERE id = $1`,
     [leadId],
   );
   const lead = result.rows[0];
@@ -191,8 +207,8 @@ async function leadForAccess(leadId, user) {
     error.statusCode = 404;
     throw error;
   }
-  if (user?.role === 'salesperson' && lead.assigned_to !== user.name) {
-    const error = new Error('Salespersons can only manage follow-ups for their assigned leads.');
+  if (!canAccessLead(lead, user)) {
+    const error = new Error('You can access only leads assigned to you.');
     error.statusCode = 403;
     throw error;
   }
@@ -339,7 +355,10 @@ async function ensureLeadStatusAllowed(lead, nextStatus) {
   return quotation;
 }
 
-async function retrieveLeads() {
+async function retrieveLeads(user) {
+  const individual = isIndividualSales(user);
+  const params = individual ? [user?.id || null, actorName(user)] : [];
+  const where = individual ? `WHERE NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1 OR l.assigned_to = $2` : '';
   const result = await pool.query(`
     SELECT ${LEAD_TABLE_COLUMNS},
       COALESCE((
@@ -361,15 +380,16 @@ async function retrieveLeads() {
         WHERE f.lead_id = l.id
       ), '[]'::json) AS followups
     FROM leads l
+    ${where}
     ORDER BY l.created_at DESC, l.id DESC
-  `);
+  `, params);
   return result.rows;
 }
 
 async function retrieveLeadActivities(leadId, user) {
-  if (user?.role === 'salesperson') {
+  if (isIndividualSales(user)) {
     const leadResult = await pool.query(
-      'SELECT assigned_to FROM leads WHERE id = $1',
+      `SELECT assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id FROM leads WHERE id = $1`,
       [leadId],
     );
     const lead = leadResult.rows[0];
@@ -378,7 +398,7 @@ async function retrieveLeadActivities(leadId, user) {
       error.statusCode = 404;
       throw error;
     }
-    if (lead.assigned_to !== user.name) {
+    if (!canAccessLead(lead, user)) {
       const error = new Error('Salespersons can only view activity for their assigned leads.');
       error.statusCode = 403;
       throw error;
@@ -399,7 +419,7 @@ async function createLeadActivity(leadId, activityData, user) {
   normalizeActivity(activityData);
 
   const leadResult = await pool.query(
-    'SELECT id, assigned_to FROM leads WHERE id = $1',
+    `SELECT id, assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id FROM leads WHERE id = $1`,
     [leadId],
   );
   const lead = leadResult.rows[0];
@@ -408,7 +428,7 @@ async function createLeadActivity(leadId, activityData, user) {
     error.statusCode = 404;
     throw error;
   }
-  if (user?.role === 'salesperson' && lead.assigned_to !== user.name) {
+  if (!canAccessLead(lead, user)) {
     const error = new Error('Salespersons can only add activity to their assigned leads.');
     error.statusCode = 403;
     throw error;
@@ -613,9 +633,10 @@ async function ensureCustomerForLead(client, lead) {
 }
 
 async function createLead(leadData, user) {
-  const values = leadValues(leadData);
-  if (QUOTATION_REQUIRED_STATUSES.has(values[13])) {
-    throw validationError(`Create the lead and send a quotation before moving it to ${values[13]}.`);
+  const ownedLeadData = isIndividualSales(user) ? { ...leadData, assigned_to: actorName(user) } : leadData;
+  const values = leadValues(ownedLeadData);
+  if (QUOTATION_REQUIRED_STATUSES.has(values[14])) {
+    throw validationError(`Create the lead and send a quotation before moving it to ${values[14]}.`);
   }
 
   const client = await pool.connect();
@@ -680,12 +701,14 @@ async function updateLead(id, leadData, user) {
   );
   const previous = previousResult.rows[0];
   if (!previous) return null;
+  if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
 
-  const values = leadValues(leadData);
+  const ownedLeadData = isIndividualSales(user) ? { ...leadData, assigned_to: actorName(user) } : leadData;
+  const values = leadValues(ownedLeadData);
   await ensureLeadStatusAllowed({
     ...previous,
-    quotation: values[11] || previous.quotation,
-  }, values[13]);
+    quotation: values[12] || previous.quotation,
+  }, values[14]);
 
   const result = await pool.query(
     `UPDATE leads
@@ -711,7 +734,6 @@ async function updateLead(id, leadData, user) {
      RETURNING ${LEAD_COLUMNS}`,
     [...values, id],
   );
-
   const lead = result.rows[0] || null;
   if (!lead) return null;
 
@@ -723,7 +745,8 @@ async function updateLead(id, leadData, user) {
   return (await retrieveLead(lead.id)) || lead;
 }
 
-async function deleteLead(id) {
+async function deleteLead(id, user) {
+  await leadForAccess(id, user);
   const result = await pool.query(
     `DELETE FROM leads WHERE id = $1 RETURNING id`,
     [id],
@@ -741,6 +764,7 @@ async function acceptProposal(id, quotation, user) {
   );
   const previous = previousResult.rows[0];
   if (!previous) return null;
+  if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can accept only proposals assigned to you.'), { statusCode: 403 });
   const sentQuotation = await ensureLeadStatusAllowed(previous, 'Proposal Accepted');
   const result = await pool.query(
     `UPDATE leads

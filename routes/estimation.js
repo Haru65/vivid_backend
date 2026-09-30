@@ -18,9 +18,11 @@ const {
   submitLeadToEstimation,
   upsertPoSheet,
 } = require('../services/estimationService');
-const { optionalUser } = require('../middleware/auth');
+const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
+router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'estimation_head', 'estimation_engineer'));
+
 
 function currentUser(req) {
   return optionalUser(req);

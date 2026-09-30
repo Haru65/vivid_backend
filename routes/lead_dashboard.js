@@ -13,9 +13,11 @@ const {
   deleteLead,
   acceptProposal,
 } = require('../controller/leads');
-const { optionalUser } = require('../middleware/auth');
+const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
+router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson'));
+
 
 function currentUser(req) {
   return optionalUser(req);
@@ -28,7 +30,7 @@ function handleActivityError(res, message, error) {
 
 router.get('/', async (req, res) => {
   try {
-    res.json(await retrieveLeads());
+    res.json(await retrieveLeads(currentUser(req)));
   } catch (error) {
     console.error('Error retrieving leads:', error);
     res.status(500).json({ error: 'Unable to retrieve leads' });
@@ -117,12 +119,11 @@ router.put('/update-lead/:id', async (req, res) => {
 
 router.delete('/delete-lead/:id', async (req, res) => {
   try {
-    const lead = await deleteLead(req.params.id);
+    const lead = await deleteLead(req.params.id, currentUser(req));
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     res.json({ id: lead.id, message: 'Lead deleted successfully' });
   } catch (error) {
-    console.error('Error deleting lead:', error);
-    res.status(500).json({ error: 'Unable to delete lead' });
+    handleActivityError(res, 'Unable to delete lead', error);
   }
 });
 

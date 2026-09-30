@@ -6,9 +6,11 @@ const {
   retrieveApproval,
   retrieveApprovals,
 } = require('../controller/approval');
-const { optionalUser } = require('../middleware/auth');
+const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
+router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson'));
+
 
 function currentUser(req) {
   return optionalUser(req);

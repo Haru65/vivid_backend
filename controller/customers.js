@@ -23,6 +23,38 @@ const CUSTOMER_COLUMNS = `
   source_lead_id,
   raw_data
 `;
+function actorName(user) {
+  return String(user?.name || '').trim();
+}
+
+function isIndividualSales(user) {
+  return ['salesperson', 'sales_engineer'].includes(String(user?.role || '').trim().toLowerCase());
+}
+
+function canAccessOwnedCustomer(customer, user) {
+  if (!isIndividualSales(user)) return true;
+  return String(customer?.sales_owner_id || '') === String(user?.id || '')
+    || String(customer?.assigned_to || '').trim() === actorName(user);
+}
+
+async function customerForAccess(id, user) {
+  const result = await pool.query(
+    `SELECT c.id, NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, l.assigned_to
+     FROM customers c
+     LEFT JOIN leads l ON l.id = c.source_lead_id
+     WHERE c.id = $1`,
+    [id],
+  );
+  const customer = result.rows[0];
+  if (!customer) return null;
+  if (!canAccessOwnedCustomer(customer, user)) {
+    const error = new Error('You can access only customers from leads assigned to you.');
+    error.statusCode = 403;
+    throw error;
+  }
+  return customer;
+}
+
 
 const AMC_STATUSES = new Set(['None', 'Active', 'Due', 'Expired']);
 
@@ -122,16 +154,28 @@ function customerValues(customerData) {
   ];
 }
 
-async function retrieveCustomers() {
+async function retrieveCustomers(user) {
+  const individual = isIndividualSales(user);
+  const params = individual ? [user?.id || null, actorName(user)] : [];
+  const where = individual
+    ? `WHERE EXISTS (SELECT 1 FROM leads l WHERE l.id = c.source_lead_id AND (NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1 OR l.assigned_to = $2))`
+    : '';
   const result = await pool.query(
     `SELECT ${CUSTOMER_COLUMNS}
-     FROM customers
-     ORDER BY created_at DESC, id DESC`,
+     FROM customers c
+     ${where}
+     ORDER BY c.created_at DESC, c.id DESC`,
+    params,
   );
   return result.rows;
 }
 
-async function createCustomer(customerData) {
+async function createCustomer(customerData, user) {
+  if (isIndividualSales(user)) {
+    const error = new Error('Customer accounts for sales users are created from their assigned leads.');
+    error.statusCode = 403;
+    throw error;
+  }
   const result = await pool.query(
     `INSERT INTO customers (
       company_name,
@@ -158,7 +202,8 @@ async function createCustomer(customerData) {
   return result.rows[0];
 }
 
-async function updateCustomer(id, customerData) {
+async function updateCustomer(id, customerData, user) {
+  if (!await customerForAccess(id, user)) return null;
   const result = await pool.query(
     `UPDATE customers
      SET company_name = $1,
@@ -186,7 +231,8 @@ async function updateCustomer(id, customerData) {
   return result.rows[0] || null;
 }
 
-async function deleteCustomer(id) {
+async function deleteCustomer(id, user) {
+  if (!await customerForAccess(id, user)) return null;
   const result = await pool.query(
     `DELETE FROM customers WHERE id = $1 RETURNING id`,
     [id],
@@ -195,7 +241,8 @@ async function deleteCustomer(id) {
   return result.rows[0] || null;
 }
 
-async function renewAmc(id) {
+async function renewAmc(id, user) {
+  if (!await customerForAccess(id, user)) return null;
   const result = await pool.query(
     `UPDATE customers
      SET amc_status = 'Active', updated_at = CURRENT_TIMESTAMP
@@ -214,7 +261,7 @@ async function convertLeadToCustomer(leadId, user) {
     await client.query('BEGIN');
 
     const leadResult = await client.query(
-      `SELECT id, company_name, contact_person_name, contact_person_phone, industry_type, segment, site_location, consultant, customer_id
+      `SELECT id, company_name, contact_person_name, contact_person_phone, industry_type, segment, site_location, consultant, customer_id, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, assigned_to
        FROM leads
        WHERE id = $1
        FOR SHARE`,
@@ -228,6 +275,11 @@ async function convertLeadToCustomer(leadId, user) {
       throw error;
     }
 
+    if (!canAccessOwnedCustomer(lead, user)) {
+      const error = new Error('You can convert only leads assigned to you.');
+      error.statusCode = 403;
+      throw error;
+    }
     const existingResult = await client.query(
       `SELECT ${CUSTOMER_COLUMNS}
        FROM customers
