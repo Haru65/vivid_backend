@@ -633,7 +633,7 @@ async function ensureCustomerForLead(client, lead) {
 }
 
 async function createLead(leadData, user) {
-  const ownedLeadData = isIndividualSales(user) ? { ...leadData, assigned_to: actorName(user) } : leadData;
+  const ownedLeadData = { ...leadData, assigned_to: actorName(user) };
   const values = leadValues(ownedLeadData);
   if (QUOTATION_REQUIRED_STATUSES.has(values[14])) {
     throw validationError(`Create the lead and send a quotation before moving it to ${values[14]}.`);
