@@ -10,6 +10,7 @@ const erpRouter = require('./routes/erp');
 const projectRouter = require('./routes/projects');
 const settingsRouter = require('./routes/settings');
 const authRouter = require('./routes/auth');
+const profileRouter = require('./routes/profileRoute');
 const { createSchemas } = require('./config/db_schema');
 const { authenticateToken } = require('./middleware/auth');
 
@@ -69,6 +70,7 @@ app.use('/notifications', notificationRouter);
 app.use('/erp', erpRouter);
 app.use('/projects', projectRouter);
 app.use('/settings', settingsRouter);
+app.use('/profile', profileRouter);
 
 async function startServer() {
   try {

@@ -3,6 +3,7 @@ const {
   authenticateUser,
   createUser,
   deactivateUser,
+  deleteUser,
   getUserById,
   listApprovalUsers,
   listUsers,
@@ -15,11 +16,13 @@ const router = express.Router();
 
 function handleError(res, message, error) {
   console.error(`${message}:`, error);
-  res.status(error.statusCode || (error.code === '23505' ? 409 : 500)).json({
+  res.status(error.statusCode || (['23503', '23505'].includes(error.code) ? 409 : 500)).json({
     error: error.statusCode
       ? error.message
       : error.code === '23505'
         ? 'A user with this email or employee code already exists.'
+        : error.code === '23503'
+          ? 'This user is linked to workspace records and cannot be permanently deleted. Deactivate the account instead.'
         : message,
   });
 }
@@ -80,6 +83,14 @@ router.delete('/users/:id', authenticateToken, async (req, res) => {
     res.json(await deactivateUser(req.params.id, req.user));
   } catch (error) {
     handleError(res, 'Unable to deactivate user', error);
+  }
+});
+
+router.delete('/users/:id/permanent', authenticateToken, async (req, res) => {
+  try {
+    res.json(await deleteUser(req.params.id, req.user));
+  } catch (error) {
+    handleError(res, 'Unable to delete user', error);
   }
 });
 

@@ -1,8 +1,6 @@
 const pool = require('../config/db_connection');
 const { logLeadActivity } = require('./leads');
-const { sendEmail } = require('../services/emailService');
-const { generateQuotationPdf } = require('../services/quotationGeneration');
-const { getTaxSettings } = require('./settings');
+
 
 const QUOTATION_COLUMNS = `
   id,
@@ -25,128 +23,20 @@ const QUOTATION_COLUMNS = `
   gst_rate,
   gst_amount,
   total_amount,
-  discount_percent,
-  discount_amount,
-  final_price,
-  payment_terms,
-  delivery_days,
-  warranty_terms,
-  customer_po_number,
-  customer_po_date,
-  order_confirmed_at,
   valid_until,
   status,
   sent_at,
   notes,
-  revision_group_id,
-  revision_number,
-  parent_quotation_id,
-  is_current_revision,
-  revision_reason,
-  negotiation_notes,
-  estimation_request_id,
-  prepared_by_user_id,
-  reviewed_by_user_id,
-  sent_by_user_id,
   created_at,
   updated_at
 `;
 
-const QUOTATION_STATUSES = new Set(['Draft', 'Sent', 'Approved', 'Rejected', 'Superseded']);
+const QUOTATION_STATUSES = new Set(['Draft', 'Sent', 'Approved', 'Rejected']);
 
 function validationError(message) {
   const error = new Error(message);
   error.statusCode = 400;
   return error;
-}
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function formatMoney(value) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return escapeHtml(value || 'Not added');
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 2,
-  }).format(amount);
-}
-
-function quotationEmailTemplate(quotation) {
-  const lineItems = Array.isArray(quotation.line_items) ? quotation.line_items : [];
-  const rows = lineItems.map((item) => `
-    <tr>
-      <td>${escapeHtml(item.description)}</td>
-      <td>${escapeHtml(item.quantity)}</td>
-      <td>${formatMoney(item.unit_price)}</td>
-      <td>${formatMoney(item.amount || Number(item.quantity || 0) * Number(item.unit_price || 0))}</td>
-    </tr>
-  `).join('');
-
-  return {
-    subject: `Quotation ${quotation.quotation_number} - Vivid Electromech`,
-    html:`
-    <div style="font-family: Arial, sans-serif; color: #222; line-height: 1.6;">
-      <p>Dear Sir/Madam,</p>
-
-      <p>
-        Please find attached our quotation for your kind review and consideration.
-      </p>
-
-      <p>
-        We trust the enclosed offer is in line with your requirements. Should you require
-        any clarification or further information, please feel free to contact us.
-      </p>
-
-      <p>
-        We look forward to your valuable response.
-      </p>
-
-      <br />
-
-      <p>
-        Thanking you,<br />
-        Yours faithfully,<br />
-        <strong>Vivid Electromech Limited</strong>
-      </p>
-    </div>
-`
-  };
-}
-
-async function sendQuotationEmail(quotation, user) {
-  const to = quotation.contact_person_email || quotation.billing_email;
-  if (!to) throw validationError('Lead contact email or billing email is required before sending quotation.');
-
-  const { pdf, filename } = {
-    pdf: await generateQuotationPdf(quotation, user),
-    filename: `${quotation.quotation_number}.pdf`,
-  };
-  const template = quotationEmailTemplate(quotation);
-  const result = await sendEmail({
-    to,
-    subject: template.subject,
-    html: template.html,
-    attachments: [
-      {
-        filename,
-        content: Buffer.from(pdf).toString('base64'),
-      },
-    ],
-  });
-
-  return {
-    ...result,
-    to,
-    subject: template.subject,
-  };
 }
 
 function requiredString(value, field, maxLength) {
@@ -164,38 +54,6 @@ function nullableString(value, field, maxLength) {
   return result || null;
 }
 
-function nullablePhone(value, field) {
-  if (value === undefined || value === null || value === '') return null;
-  const digits = String(value).replace(/\D/g, '');
-  if (!digits) return null;
-  if (digits.length !== 10) throw validationError(`${field} must be exactly 10 digits.`);
-  return digits;
-}
-
-function nullableEmail(value, field) {
-  const result = nullableString(value, field, 255);
-  if (!result) return null;
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(result)) throw validationError(`${field} must be a valid email address.`);
-  return result;
-}
-
-function nullableGstin(value, field) {
-  const result = nullableString(value, field, 15);
-  if (!result) return null;
-  const normalized = result.toUpperCase();
-  if (!/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(normalized)) {
-    throw validationError(`${field} must be a valid 15-character GSTIN.`);
-  }
-  return normalized;
-}
-
-function nullablePincode(value, field) {
-  const result = nullableString(value, field, 6);
-  if (!result) return null;
-  if (!/^\d{6}$/.test(result)) throw validationError(`${field} must be exactly 6 digits.`);
-  return result;
-}
-
 function positiveInteger(value, field) {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) throw validationError(`${field} must be a whole number greater than zero.`);
@@ -206,18 +64,6 @@ function nonNegativeNumber(value, field, defaultValue = 0) {
   if (value === undefined || value === null || value === '') return defaultValue;
   const number = Number(value);
   if (!Number.isFinite(number) || number < 0) throw validationError(`${field} must be zero or more.`);
-  return number;
-}
-
-function nullableNonNegativeNumber(value, field) {
-  if (value === undefined || value === null || value === '') return null;
-  return nonNegativeNumber(value, field);
-}
-
-function nullableInteger(value, field) {
-  if (value === undefined || value === null || value === '') return null;
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 0) throw validationError(`${field} must be a whole number of zero or more.`);
   return number;
 }
 
@@ -245,177 +91,43 @@ function normalizeLineItems(items) {
   });
 }
 
-function normalizedValues(data, taxSettings = { gst_rate: 18 }) {
+function normalizedValues(data) {
   const lineItems = normalizeLineItems(data.line_items);
   const subtotal = Number(lineItems.reduce((sum, item) => sum + item.amount, 0).toFixed(2));
-  const gstRate = nonNegativeNumber(taxSettings.gst_rate, 'GST rate', 18);
+  const gstRate = nonNegativeNumber(data.gst_rate, 'GST rate', 18);
   if (gstRate > 100) throw validationError('GST rate cannot exceed 100%.');
-  const discountPercent = nonNegativeNumber(data.discount_percent, 'Discount', 0);
-  if (discountPercent > 100) throw validationError('Discount cannot exceed 100%.');
-  const discountAmount = Number((subtotal * discountPercent / 100).toFixed(2));
-  const taxableAmount = Math.max(0, subtotal - discountAmount);
-  const gstAmount = Number((taxableAmount * gstRate / 100).toFixed(2));
-  const finalPrice = nullableNonNegativeNumber(data.final_price, 'Final price');
-  const totalAmount = finalPrice === null ? Number((taxableAmount + gstAmount).toFixed(2)) : Number(finalPrice.toFixed(2));
+  const gstAmount = Number((subtotal * gstRate / 100).toFixed(2));
+  const totalAmount = Number((subtotal + gstAmount).toFixed(2));
 
   return {
     leadId: positiveInteger(data.lead_id, 'Lead'),
     companyName: requiredString(data.company_name, 'Company name', 255),
     contactPersonName: nullableString(data.contact_person_name, 'Contact person name', 255),
-    contactPersonEmail: nullableEmail(data.contact_person_email, 'Contact person email'),
-    contactPersonPhone: nullablePhone(data.contact_person_phone, 'Contact person phone'),
+    contactPersonEmail: nullableString(data.contact_person_email, 'Contact person email', 255),
+    contactPersonPhone: nullableString(data.contact_person_phone, 'Contact person phone', 20),
     billingName: requiredString(data.billing_name, 'Billing name', 255),
     billingAddress: requiredString(data.billing_address, 'Billing address', 5000),
     billingCity: nullableString(data.billing_city, 'Billing city', 255),
     billingState: nullableString(data.billing_state, 'Billing state', 255),
-    billingPincode: nullablePincode(data.billing_pincode, 'Billing pincode'),
-    billingGstin: nullableGstin(data.billing_gstin, 'Billing GSTIN'),
-    billingEmail: nullableEmail(data.billing_email, 'Billing email'),
-    billingPhone: nullablePhone(data.billing_phone, 'Billing phone'),
+    billingPincode: nullableString(data.billing_pincode, 'Billing pincode', 20),
+    billingGstin: nullableString(data.billing_gstin, 'Billing GSTIN', 20),
+    billingEmail: nullableString(data.billing_email, 'Billing email', 255),
+    billingPhone: nullableString(data.billing_phone, 'Billing phone', 20),
     lineItems,
     subtotal,
     gstRate,
     gstAmount,
     totalAmount,
-    discountPercent,
-    discountAmount,
-    finalPrice,
-    paymentTerms: nullableString(data.payment_terms, 'Payment terms', 1000),
-    deliveryDays: nullableInteger(data.delivery_days, 'Delivery days'),
-    warrantyTerms: nullableString(data.warranty_terms, 'Warranty terms', 1000),
-    customerPoNumber: nullableString(data.customer_po_number, 'Customer PO number', 100),
-    customerPoDate: normalizeDate(data.customer_po_date, 'Customer PO date'),
     validUntil: normalizeDate(data.valid_until, 'Valid until'),
     notes: nullableString(data.notes, 'Notes', 5000),
-    revisionReason: nullableString(data.revision_reason, 'Revision reason', 5000),
-    negotiationNotes: nullableString(data.negotiation_notes, 'Negotiation notes', 5000),
   };
 }
 
-function roleOf(user) {
-  return String(user?.role || '').trim().toLowerCase();
-}
-
-function nameOf(user) {
-  return String(user?.name || '').trim();
-}
-
-function quotationVisibilityFilter(user, startIndex = 1) {
-  const role = roleOf(user);
-  if (['admin', 'estimation_head', 'sales_head'].includes(role)) {
-    return { clause: '', params: [] };
-  }
-  if (role === 'estimation_engineer') {
-    return {
-      clause: `WHERE (
-        quotations.prepared_by_user_id = $${startIndex}
-        OR EXISTS (
-          SELECT 1 FROM estimation_requests er
-          WHERE er.id = quotations.estimation_request_id
-            AND er.assigned_engineer_id = $${startIndex}
-        )
-      )`,
-      params: [user?.id || null],
-    };
-  }
-  if (['sales_engineer', 'salesperson'].includes(role)) {
-    return {
-      clause: `WHERE EXISTS (
-        SELECT 1
-        FROM leads l
-        LEFT JOIN estimation_requests er ON er.id = quotations.estimation_request_id
-        WHERE l.id = quotations.lead_id
-          AND (
-            l.assigned_to = $${startIndex}
-            OR er.sales_owner_id = $${startIndex + 1}
-            OR er.requested_by_user_id = $${startIndex + 1}
-            OR er.sales_owner_name = $${startIndex}
-            OR er.requested_by_name = $${startIndex}
-          )
-      )`,
-      params: [nameOf(user), user?.id || null],
-    };
-  }
-  return { clause: 'WHERE FALSE', params: [] };
-}
-async function assertCanAccessQuotation(id, user) {
-  const visibility = quotationVisibilityFilter(user, 2);
-  const condition = visibility.clause ? visibility.clause.replace(/^WHERE/, 'AND') : '';
+async function retrieveQuotations() {
   const result = await pool.query(
-    `SELECT quotations.id FROM quotations WHERE quotations.id = $1 ${condition}`,
-    [id, ...visibility.params],
-  );
-  if (!result.rows[0]) {
-    const error = new Error('Quotation not found or not available to this user.');
-    error.statusCode = 403;
-    throw error;
-  }
-  return result.rows[0];
-}
-
-async function assertCanPrepareQuotation(leadId, user) {
-  const role = roleOf(user);
-  if (['admin', 'estimation_head'].includes(role)) return;
-  if (role !== 'estimation_engineer') {
-    throw Object.assign(new Error('Only estimation users can prepare quotation drafts.'), { statusCode: 403 });
-  }
-  const result = await pool.query(
-    `SELECT 1 FROM estimation_requests
-     WHERE lead_id = $1
-       AND assigned_engineer_id = $2
-       AND status NOT IN ('cancelled', 'discarded')
-     LIMIT 1`,
-    [leadId, user?.id || null],
-  );
-  if (!result.rows[0]) throw Object.assign(new Error('This lead is not assigned to you for estimation.'), { statusCode: 403 });
-}
-
-async function retrieveQuotations(user = {}) {
-  const visibility = quotationVisibilityFilter(user);
-  const result = await pool.query(
-    `SELECT ${QUOTATION_COLUMNS},
-       (SELECT er.status FROM estimation_requests er WHERE er.id = quotations.estimation_request_id) AS estimation_status,
-       COALESCE((
-         SELECT json_agg(json_build_object(
-           'id', n.id,
-           'lead_id', n.lead_id,
-           'quotation_id', n.quotation_id,
-           'negotiation_type', n.negotiation_type,
-           'old_value', n.old_value,
-           'proposed_value', n.proposed_value,
-           'reason', n.reason,
-           'requested_by_name', n.requested_by_name,
-           'requested_by_role', n.requested_by_role,
-           'requires_approval', n.requires_approval,
-           'approval_request_id', n.approval_request_id,
-           'status', n.status,
-           'created_at', n.created_at,
-           'updated_at', n.updated_at
-         ) ORDER BY n.created_at DESC, n.id DESC)
-         FROM negotiations n
-         WHERE n.quotation_id = quotations.id
-       ), '[]'::json) AS negotiations
-       , (
-         SELECT json_build_object(
-           'handover_id', h.id,
-           'handover_number', h.handover_number,
-           'handover_status', h.status,
-           'project_id', p.id,
-           'project_number', p.project_number,
-           'project_status', p.status,
-           'project_progress', p.overall_progress
-         )
-         FROM crm_erp_handovers h
-         LEFT JOIN projects p ON p.id = h.project_id
-         WHERE h.quotation_id = quotations.id
-           AND h.status NOT IN ('rejected', 'cancelled')
-         ORDER BY h.created_at DESC, h.id DESC
-         LIMIT 1
-       ) AS erp_handover
+    `SELECT ${QUOTATION_COLUMNS}
      FROM quotations
-     ${visibility.clause}
      ORDER BY created_at DESC, id DESC`,
-    visibility.params,
   );
   return result.rows;
 }
@@ -429,39 +141,8 @@ async function findLead(leadId) {
   return result.rows[0] || null;
 }
 
-async function generateQuotationDocument(id, user) {
-  await assertCanAccessQuotation(id, user);
-  const result = await pool.query(
-    `SELECT ${QUOTATION_COLUMNS},
-       (SELECT assigned_to FROM leads WHERE leads.id = quotations.lead_id) AS assigned_to
-     FROM quotations
-     WHERE quotations.id = $1`,
-    [id],
-  );
-  const quotation = result.rows[0];
-  if (!quotation) {
-    const error = new Error('Quotation not found');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const pdf = await generateQuotationPdf(quotation, user);
-  await logLeadActivity(quotation.lead_id, {
-    activity_type: 'system',
-    content: `Quotation PDF generated for ${quotation.quotation_number}`,
-  }, user);
-
-  return {
-    filename: `${quotation.quotation_number}.pdf`,
-    pdf,
-    quotation,
-  };
-}
-
-async function createQuotation(data, user) {
-  const taxSettings = await getTaxSettings();
-  const values = normalizedValues(data, taxSettings);
-  await assertCanPrepareQuotation(values.leadId, user);
+async function createQuotation(data) {
+  const values = normalizedValues(data);
   const lead = await findLead(values.leadId);
   if (!lead) {
     const error = new Error('Lead not found');
@@ -492,22 +173,9 @@ async function createQuotation(data, user) {
       gst_rate,
       gst_amount,
       total_amount,
-      discount_percent,
-      discount_amount,
-      final_price,
-      payment_terms,
-      delivery_days,
-      warranty_terms,
-      customer_po_number,
-      customer_po_date,
-      order_confirmed_at,
       valid_until,
-      notes,
-      revision_number,
-      is_current_revision,
-      revision_reason,
-      negotiation_notes
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NULL, $28, $29, 0, TRUE, $30, $31)
+      notes
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
     RETURNING ${QUOTATION_COLUMNS}`,
     [
       quotationNumber,
@@ -529,52 +197,16 @@ async function createQuotation(data, user) {
       values.gstRate,
       values.gstAmount,
       values.totalAmount,
-      values.discountPercent,
-      values.discountAmount,
-      values.finalPrice,
-      values.paymentTerms,
-      values.deliveryDays,
-      values.warrantyTerms,
-      values.customerPoNumber,
-      values.customerPoDate,
       values.validUntil,
       values.notes,
-      values.revisionReason,
-      values.negotiationNotes,
     ],
   );
 
-  const groupResult = await pool.query(
-    `UPDATE quotations
-     SET revision_group_id = id
-     WHERE id = $1
-     RETURNING ${QUOTATION_COLUMNS}`,
-    [result.rows[0].id],
-  );
-  const quotation = groupResult.rows[0];
-  await logLeadActivity(quotation.lead_id, {
-    activity_type: 'system',
-    content: `Quotation ${quotation.quotation_number} drafted for ${quotation.company_name}`,
-  }, user);
-
-  return quotation;
+  return result.rows[0];
 }
 
-async function updateQuotation(id, data, user) {
-  if (!['admin', 'estimation_head', 'estimation_engineer'].includes(roleOf(user))) throw Object.assign(new Error('Only estimation users can edit quotation drafts.'), { statusCode: 403 });
-  await assertCanAccessQuotation(id, user);
-  const existingResult = await pool.query(
-    `SELECT id, lead_id, quotation_number
-     FROM quotations
-     WHERE id = $1 AND status = 'Draft'`,
-    [id],
-  );
-  const existing = existingResult.rows[0];
-  if (!existing) return null;
-
-  const taxSettings = await getTaxSettings();
-  const values = normalizedValues(data, taxSettings);
-  await assertCanPrepareQuotation(values.leadId, user);
+async function updateQuotation(id, data) {
+  const values = normalizedValues(data);
   const result = await pool.query(
     `UPDATE quotations
      SET lead_id = $1,
@@ -595,25 +227,10 @@ async function updateQuotation(id, data, user) {
          gst_rate = $16,
          gst_amount = $17,
          total_amount = $18,
-         discount_percent = $19,
-         discount_amount = $20,
-         final_price = $21,
-         payment_terms = $22,
-         delivery_days = $23,
-         warranty_terms = $24,
-         customer_po_number = $25,
-         customer_po_date = $26,
-         order_confirmed_at = CASE
-           WHEN $25::varchar IS NOT NULL AND order_confirmed_at IS NULL THEN CURRENT_TIMESTAMP
-           WHEN $25::varchar IS NULL THEN NULL
-           ELSE order_confirmed_at
-         END,
-         valid_until = $27,
-         notes = $28,
-         revision_reason = $29,
-         negotiation_notes = $30,
+         valid_until = $19,
+         notes = $20,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $31 AND status = 'Draft'
+     WHERE id = $21 AND status = 'Draft'
      RETURNING ${QUOTATION_COLUMNS}`,
     [
       values.leadId,
@@ -634,305 +251,25 @@ async function updateQuotation(id, data, user) {
       values.gstRate,
       values.gstAmount,
       values.totalAmount,
-      values.discountPercent,
-      values.discountAmount,
-      values.finalPrice,
-      values.paymentTerms,
-      values.deliveryDays,
-      values.warrantyTerms,
-      values.customerPoNumber,
-      values.customerPoDate,
       values.validUntil,
       values.notes,
-      values.revisionReason,
-      values.negotiationNotes,
       id,
     ],
   );
 
-  const quotation = result.rows[0] || null;
-  if (!quotation) return null;
-
-  const activity = {
-    activity_type: 'system',
-    content: `Quotation ${quotation.quotation_number} draft updated`,
-  };
-  await logLeadActivity(quotation.lead_id, activity, user);
-  if (String(existing.lead_id) !== String(quotation.lead_id)) {
-    await logLeadActivity(existing.lead_id, {
-      activity_type: 'system',
-      content: `Quotation ${quotation.quotation_number} moved to another lead`,
-    }, user);
-  }
-
-  return quotation;
+  return result.rows[0] || null;
 }
 
-async function deleteQuotation(id, user) {
-  if (!['admin', 'estimation_head', 'estimation_engineer'].includes(roleOf(user))) throw Object.assign(new Error('Only estimation users can delete quotation drafts.'), { statusCode: 403 });
-  await assertCanAccessQuotation(id, user);
-  const client = await pool.connect();
-  let quotation = null;
-  let restored = null;
-  try {
-    await client.query('BEGIN');
-    const result = await client.query(
-      `DELETE FROM quotations
-       WHERE id = $1 AND status = 'Draft'
-       RETURNING id, lead_id, quotation_number, revision_group_id, revision_number`,
-      [id],
-    );
-    quotation = result.rows[0] || null;
-    if (!quotation) {
-      await client.query('ROLLBACK');
-      return null;
-    }
-
-    if (quotation.revision_group_id && Number(quotation.revision_number) > 0) {
-      const restoredResult = await client.query(
-        `UPDATE quotations
-         SET is_current_revision = TRUE,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = (
-           SELECT id
-           FROM quotations
-           WHERE revision_group_id = $1
-           ORDER BY revision_number DESC, id DESC
-           LIMIT 1
-         )
-         RETURNING id, lead_id, quotation_number, status`,
-        [quotation.revision_group_id],
-      );
-      restored = restoredResult.rows[0] || null;
-      if (restored) {
-        await client.query(
-          `UPDATE leads
-           SET quotation = $1,
-               lead_status = CASE
-                 WHEN LOWER(lead_status) LIKE '%accept%' OR LOWER(lead_status) = 'won' THEN lead_status
-                 WHEN LOWER(lead_status) LIKE '%lost%' THEN lead_status
-                 WHEN $3 = 'Sent' THEN 'Proposal Sent'
-                 ELSE lead_status
-               END
-           WHERE id = $2`,
-          [restored.quotation_number, restored.lead_id, restored.status],
-        );
-      }
-    }
-
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-
-  await logLeadActivity(quotation.lead_id, {
-    activity_type: 'system',
-    content: `Quotation ${quotation.quotation_number} draft deleted`,
-  }, user);
-  if (restored) {
-    await logLeadActivity(restored.lead_id, {
-      activity_type: 'system',
-      content: `Quotation ${restored.quotation_number} restored as current revision`,
-    }, user);
-  }
-
-  return quotation;
-}
-
-function baseQuotationNumber(quotationNumber) {
-  return String(quotationNumber || '').replace(/-R\d+$/i, '');
-}
-
-async function createQuotationRevision(id, data = {}, user) {
-  const client = await pool.connect();
-  let revision = null;
-  let source = null;
-  try {
-  await assertCanAccessQuotation(id, user);
-    await client.query('BEGIN');
-    const sourceResult = await client.query(
-      `SELECT ${QUOTATION_COLUMNS}
-       FROM quotations
-       WHERE id = $1
-       FOR UPDATE`,
-      [id],
-    );
-    source = sourceResult.rows[0];
-    if (!source) {
-      const error = new Error('Quotation not found');
-      error.statusCode = 404;
-      throw error;
-    }
-    if (source.status !== 'Sent') {
-      const error = new Error('Only sent quotations can be revised.');
-      error.statusCode = 400;
-      throw error;
-    }
-
-    const groupId = source.revision_group_id || source.id;
-    const draftResult = await client.query(
-      `SELECT id, quotation_number
-       FROM quotations
-       WHERE revision_group_id = $1 AND status = 'Draft'
-       ORDER BY revision_number DESC
-       LIMIT 1`,
-      [groupId],
-    );
-    if (draftResult.rows[0]) {
-      const error = new Error(`Draft revision ${draftResult.rows[0].quotation_number} already exists.`);
-      error.statusCode = 400;
-      throw error;
-    }
-
-    const maxResult = await client.query(
-      `SELECT COALESCE(MAX(revision_number), 0) AS max_revision
-       FROM quotations
-       WHERE revision_group_id = $1`,
-      [groupId],
-    );
-    const nextRevision = Number(maxResult.rows[0].max_revision || 0) + 1;
-
-    const originalResult = await client.query(
-      `SELECT quotation_number
-       FROM quotations
-       WHERE revision_group_id = $1 AND revision_number = 0
-       ORDER BY id
-       LIMIT 1`,
-      [groupId],
-    );
-    const quotationNumber = `${baseQuotationNumber(originalResult.rows[0]?.quotation_number || source.quotation_number)}-R${nextRevision}`;
-    const revisionReason = nullableString(data.revision_reason, 'Revision reason', 5000)
-      || 'Negotiation requested by lead';
-    const negotiationNotes = nullableString(data.negotiation_notes, 'Negotiation notes', 5000)
-      || source.negotiation_notes
-      || null;
-
-    await client.query(
-      `UPDATE quotations
-       SET is_current_revision = FALSE,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE revision_group_id = $1`,
-      [groupId],
-    );
-
-    const revisionResult = await client.query(
-      `INSERT INTO quotations (
-        quotation_number,
-        lead_id,
-        company_name,
-        contact_person_name,
-        contact_person_email,
-        contact_person_phone,
-        billing_name,
-        billing_address,
-        billing_city,
-        billing_state,
-        billing_pincode,
-        billing_gstin,
-        billing_email,
-        billing_phone,
-        line_items,
-        subtotal,
-        gst_rate,
-        gst_amount,
-        total_amount,
-        discount_percent,
-        discount_amount,
-        final_price,
-        payment_terms,
-        delivery_days,
-        warranty_terms,
-        customer_po_number,
-        customer_po_date,
-        order_confirmed_at,
-        valid_until,
-        status,
-        notes,
-        revision_group_id,
-        revision_number,
-        parent_quotation_id,
-        is_current_revision,
-        revision_reason,
-        negotiation_notes,
-        estimation_request_id,
-        prepared_by_user_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, NULL, $28, 'Draft', $29, $30, $31, $32, TRUE, $33, $34, $35, $36)
-      RETURNING ${QUOTATION_COLUMNS}`,
-      [
-        quotationNumber,
-        source.lead_id,
-        source.company_name,
-        source.contact_person_name,
-        source.contact_person_email,
-        source.contact_person_phone,
-        source.billing_name,
-        source.billing_address,
-        source.billing_city,
-        source.billing_state,
-        source.billing_pincode,
-        source.billing_gstin,
-        source.billing_email,
-        source.billing_phone,
-        JSON.stringify(source.line_items || []),
-        source.subtotal,
-        source.gst_rate,
-        source.gst_amount,
-        source.total_amount,
-        source.discount_percent,
-        source.discount_amount,
-        source.final_price,
-        source.payment_terms,
-        source.delivery_days,
-        source.warranty_terms,
-        source.customer_po_number,
-        source.customer_po_date,
-        source.valid_until,
-        source.notes,
-        groupId,
-        nextRevision,
-        source.id,
-        revisionReason,
-        negotiationNotes,
-        source.estimation_request_id,
-        source.prepared_by_user_id,
-      ],
-    );
-
-    await client.query(
-      `UPDATE leads
-       SET quotation = $1,
-           lead_status = 'Negotiation'
-       WHERE id = $2`,
-      [quotationNumber, source.lead_id],
-    );
-
-    revision = revisionResult.rows[0];
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-
-  await logLeadActivity(revision.lead_id, {
-    activity_type: 'system',
-    content: `Negotiation started; revision ${revision.quotation_number} drafted from ${source.quotation_number}`,
-  }, user);
-
-  return revision;
+async function deleteQuotation(id) {
+  const result = await pool.query(
+    `DELETE FROM quotations WHERE id = $1 AND status = 'Draft' RETURNING id`,
+    [id],
+  );
+  return result.rows[0] || null;
 }
 
 async function sendQuotation(id, user) {
-  if (!['admin', 'sales_head', 'sales_engineer', 'salesperson'].includes(roleOf(user))) throw Object.assign(new Error('Only sales users can send quotations to clients.'), { statusCode: 403 });
-  await assertCanAccessQuotation(id, user);
   const client = await pool.connect();
-  let updatedQuotation = null;
-  let supersededQuotations = [];
-  let emailResult = null;
   try {
     await client.query('BEGIN');
     const quotationResult = await client.query(
@@ -950,51 +287,13 @@ async function sendQuotation(id, user) {
       error.statusCode = 400;
       throw error;
     }
-    if (quotation.estimation_request_id) {
-      const estimationResult = await client.query(
-        `SELECT status FROM estimation_requests WHERE id = $1`,
-        [quotation.estimation_request_id],
-      );
-      if (!['returned_to_sales', 'submitted_for_review', 'revision_submitted_for_review'].includes(estimationResult.rows[0]?.status)) {
-        const error = new Error('Estimation quotation must be sent back to sales before sending to client.');
-        error.statusCode = 400;
-        throw error;
-      }
-    }
-
-    emailResult = await sendQuotationEmail(quotation, user);
-
-    const groupId = quotation.revision_group_id || quotation.id;
-    await client.query(
-      `UPDATE quotations
-       SET is_current_revision = FALSE,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE revision_group_id = $1 AND id <> $2`,
-      [groupId, id],
-    );
-
-    const supersededResult = await client.query(
-      `UPDATE quotations
-       SET status = 'Superseded',
-           updated_at = CURRENT_TIMESTAMP
-       WHERE revision_group_id = $1
-         AND id <> $2
-         AND status = 'Sent'
-       RETURNING quotation_number`,
-      [groupId, id],
-    );
-    supersededQuotations = supersededResult.rows;
 
     const updatedResult = await client.query(
       `UPDATE quotations
-       SET status = 'Sent',
-           sent_at = CURRENT_TIMESTAMP,
-           revision_group_id = $2,
-           is_current_revision = TRUE,
-           updated_at = CURRENT_TIMESTAMP
+       SET status = 'Sent', sent_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
        WHERE id = $1
        RETURNING ${QUOTATION_COLUMNS}`,
-      [id, groupId],
+      [id],
     );
 
     await client.query(
@@ -1003,49 +302,20 @@ async function sendQuotation(id, user) {
            lead_status = CASE
              WHEN LOWER(lead_status) LIKE '%accept%' OR LOWER(lead_status) = 'won' THEN lead_status
              WHEN LOWER(lead_status) LIKE '%lost%' THEN lead_status
-             WHEN $3::int > 0 THEN 'Negotiation'
              ELSE 'Proposal Sent'
            END
        WHERE id = $2`,
-      [quotation.quotation_number, quotation.lead_id, quotation.revision_number || 0],
+      [quotation.quotation_number, quotation.lead_id],
     );
 
-    if (quotation.estimation_request_id) {
-      await client.query(
-        `UPDATE estimation_requests
-         SET status = 'sent_to_client',
-             sent_to_client_at = CURRENT_TIMESTAMP,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1`,
-        [quotation.estimation_request_id],
-      );
-      await client.query(
-        `UPDATE quotations SET sent_by_user_id = $1 WHERE id = $2`,
-        [user?.id || null, id],
-      );
-    }
-
-    updatedQuotation = updatedResult.rows[0];
+    await logLeadActivity(quotation.lead_id, {
+      activity_type: 'system',
+      content: `Quotation ${quotation.quotation_number} sent to client`,
+    }, user, client);
 
     await client.query('COMMIT');
 
-    await logLeadActivity(updatedQuotation.lead_id, {
-      activity_type: 'email',
-      content: `${updatedQuotation.revision_number > 0 ? 'Revision' : 'Quotation'} ${updatedQuotation.quotation_number} emailed to ${emailResult.to}`,
-      metadata: {
-        quotation_id: updatedQuotation.id,
-        quotation_number: updatedQuotation.quotation_number,
-        email_to: emailResult.to,
-        email_subject: emailResult.subject,
-        email_provider_id: emailResult.id,
-      },
-    }, user);
-    await Promise.all(supersededQuotations.map((item) => logLeadActivity(updatedQuotation.lead_id, {
-      activity_type: 'system',
-      content: `Quotation ${item.quotation_number} marked superseded`,
-    }, user)));
-
-    return updatedQuotation;
+    return updatedResult.rows[0];
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
@@ -1057,9 +327,7 @@ async function sendQuotation(id, user) {
 module.exports = {
   retrieveQuotations,
   createQuotation,
-  createQuotationRevision,
   updateQuotation,
   deleteQuotation,
   sendQuotation,
-  generateQuotationDocument,
 };

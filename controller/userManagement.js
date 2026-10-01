@@ -1,8 +1,11 @@
 const crypto = require('crypto');
 const pool = require('../config/db_connection');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const USER_ROLES = new Set(['admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp']);
-const PASSWORD_HASH_PREFIX = 'pbkdf2';
+const PASSWORD_HASH_PREFIX = process.env.PASSWORD_HASH_PREFIX ;
 const PASSWORD_ITERATIONS = 120000;
 const PASSWORD_KEY_LENGTH = 64;
 const PASSWORD_DIGEST = 'sha512';
@@ -266,6 +269,26 @@ async function deactivateUser(id, actor) {
   return updateUser(id, { is_active: false }, actor);
 }
 
+async function deleteUser(id, actor) {
+  requireAdmin(actor);
+  if (String(actor?.id) === String(id)) throw appError('You cannot delete your own account.', 409);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('UPDATE users SET manager_id = NULL WHERE manager_id = $1', [id]);
+    const result = await client.query('DELETE FROM users WHERE id = $1 RETURNING *', [id]);
+    if (!result.rows[0]) throw appError('User not found.', 404);
+    await client.query('COMMIT');
+    return normalizeUser(result.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function authenticateUser(email, password) {
   const user = await findUserByEmail(email);
   if (!user || !user.is_active || !verifyPassword(password, user.password_hash)) {
@@ -280,10 +303,13 @@ module.exports = {
   createUser,
   createUserSchema,
   deactivateUser,
+  deleteUser,
   getUserById,
+  hashPassword,
   listApprovalUsers,
   listUsers,
   normalizeRole,
   normalizeUser,
   updateUser,
+  verifyPassword,
 };
