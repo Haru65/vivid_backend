@@ -1,5 +1,6 @@
 const pool = require('../config/db_connection');
 const { logLeadActivity } = require('./leads');
+const { generateQuotationPdf } = require('../services/quotationGeneration');
 
 
 const QUOTATION_COLUMNS = `
@@ -139,6 +140,34 @@ async function findLead(leadId) {
     [leadId],
   );
   return result.rows[0] || null;
+}
+
+async function generateQuotationDocument(id, user) {
+  const result = await pool.query(
+    `SELECT ${QUOTATION_COLUMNS},
+       (SELECT assigned_to FROM leads WHERE leads.id = quotations.lead_id) AS assigned_to
+     FROM quotations
+     WHERE quotations.id = $1`,
+    [id],
+  );
+  const quotation = result.rows[0];
+  if (!quotation) {
+    const error = new Error('Quotation not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const pdf = await generateQuotationPdf(quotation, user);
+  await logLeadActivity(quotation.lead_id, {
+    activity_type: 'system',
+    content: `Quotation PDF generated for ${quotation.quotation_number}`,
+  }, user);
+
+  return {
+    filename: `${quotation.quotation_number}.pdf`,
+    pdf,
+    quotation,
+  };
 }
 
 async function createQuotation(data) {
@@ -330,4 +359,5 @@ module.exports = {
   updateQuotation,
   deleteQuotation,
   sendQuotation,
+  generateQuotationDocument,
 };
