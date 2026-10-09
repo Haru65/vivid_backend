@@ -1,4 +1,5 @@
 const pool = require('../config/db_connection');
+const { getMasterSettings } = require('./settings');
 
 const LEAD_COLUMNS = `
   id,
@@ -7,6 +8,8 @@ const LEAD_COLUMNS = `
   contact_person_email,
   contact_person_phone,
   enquiry_date,
+  enquiry_state,
+  sales_approval_status,
   priority,
   customer_id,
   segment,
@@ -32,6 +35,8 @@ const LEAD_TABLE_COLUMNS = `
   l.contact_person_email,
   l.contact_person_phone,
   l.enquiry_date,
+  l.enquiry_state,
+  l.sales_approval_status,
   l.priority,
   l.customer_id,
   l.segment,
@@ -53,6 +58,8 @@ const LEAD_TABLE_COLUMNS = `
 const ACTIVITY_TYPES = new Set(['note', 'call', 'whatsapp', 'system', 'email', 'meeting', 'negotiation', 'approval_requested', 'approval']);
 const LEAD_STATUSES = new Set(['New', 'Qualified', 'Proposal Sent', 'Negotiation', 'Proposal Accepted', 'Lost']);
 const LEAD_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
+const ENQUIRY_STATES = new Set(['Purchase', 'Tender', 'Budget']);
+const SALES_APPROVAL_STATUSES = new Set(['Vivid Approved', 'ABB Approval', 'Not Vivid Approved']);
 const QUOTATION_REQUIRED_STATUSES = new Set(['Proposal Sent', 'Negotiation', 'Proposal Accepted']);
 const FOLLOWUP_TYPES = new Set(['Call', 'WhatsApp', 'Email', 'Meeting', 'Payment', 'Quotation', 'General']);
 const FOLLOWUP_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
@@ -281,6 +288,8 @@ function leadUpdateActivities(previous, next) {
     ['contact_person_email', 'contact email'],
     ['contact_person_phone', 'contact phone'],
     ['enquiry_date', 'enquiry date'],
+    ['enquiry_state', 'enquiry state'],
+    ['sales_approval_status', 'sales approval status'],
     ['priority', 'priority'],
     ['segment', 'segment'],
     ['site_location', 'site location'],
@@ -304,6 +313,10 @@ function leadValues(leadData) {
   if (!LEAD_STATUSES.has(status)) throw validationError('Lead status is invalid.');
   const priority = text(leadData.priority || 'Medium', 'Priority', 20, true);
   if (!LEAD_PRIORITIES.has(priority)) throw validationError('Priority is invalid.');
+  const enquiryState = text(leadData.enquiry_state || 'Purchase', 'Enquiry state', 20, true);
+  if (!ENQUIRY_STATES.has(enquiryState)) throw validationError('Enquiry state is invalid.');
+  const salesApprovalStatus = text(leadData.sales_approval_status || 'Not Vivid Approved', 'Sales approval status', 30, true);
+  if (!SALES_APPROVAL_STATUSES.has(salesApprovalStatus)) throw validationError('Sales approval status is invalid.');
   return [
     text(leadData.company_name, 'Company name', 255, true),
     text(leadData.contact_person_name, 'Contact person', 255, true),
@@ -323,7 +336,19 @@ function leadValues(leadData) {
     text(leadData.requirements_summary, 'Requirements summary', 5000),
     text(leadData.assigned_to, 'Assigned to', 255),
     jsonObject(leadData.raw_data, 'Raw data'),
+    enquiryState,
+    salesApprovalStatus,
   ];
+}
+
+async function ensureLeadSourceAllowed(leadSource, existingLeadSource = null) {
+  const value = String(leadSource || '').trim();
+  if (existingLeadSource && value.toLowerCase() === String(existingLeadSource).trim().toLowerCase()) return;
+  const settings = await getMasterSettings();
+  const sources = Array.isArray(settings.lead_sources) ? settings.lead_sources : [];
+  if (!sources.some((source) => source.toLowerCase() === value.toLowerCase())) {
+    throw validationError('Select a lead source configured in Masters.');
+  }
 }
 
 async function sentQuotationForLead(lead) {
@@ -634,6 +659,7 @@ async function ensureCustomerForLead(client, lead) {
 
 async function createLead(leadData, user) {
   const ownedLeadData = { ...leadData, assigned_to: actorName(user) };
+  await ensureLeadSourceAllowed(ownedLeadData.lead_source);
   const values = leadValues(ownedLeadData);
   if (QUOTATION_REQUIRED_STATUSES.has(values[14])) {
     throw validationError(`Create the lead and send a quotation before moving it to ${values[14]}.`);
@@ -663,8 +689,10 @@ async function createLead(leadData, user) {
         lead_status,
         requirements_summary,
         assigned_to,
-        raw_data
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        raw_data,
+        enquiry_state,
+        sales_approval_status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
       RETURNING ${LEAD_COLUMNS}`,
       values,
     );
@@ -704,6 +732,7 @@ async function updateLead(id, leadData, user) {
   if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
 
   const ownedLeadData = isIndividualSales(user) ? { ...leadData, assigned_to: actorName(user) } : leadData;
+  await ensureLeadSourceAllowed(ownedLeadData.lead_source, previous.lead_source);
   const values = leadValues(ownedLeadData);
   await ensureLeadStatusAllowed({
     ...previous,
@@ -729,8 +758,10 @@ async function updateLead(id, leadData, user) {
          lead_status = $15,
          requirements_summary = $16,
          assigned_to = $17,
-         raw_data = $18
-     WHERE id = $19
+         raw_data = $18,
+         enquiry_state = $19,
+         sales_approval_status = $20
+     WHERE id = $21
      RETURNING ${LEAD_COLUMNS}`,
     [...values, id],
   );

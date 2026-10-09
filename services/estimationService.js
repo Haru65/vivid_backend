@@ -74,6 +74,8 @@ const SELECT_REQUEST = `
   l.contact_person_email,
   l.contact_person_phone,
   l.lead_status,
+  l.enquiry_state,
+  l.sales_approval_status,
   q.quotation_number,
   q.status AS quotation_status,
   q.total_amount AS quotation_total,
@@ -86,7 +88,11 @@ const SELECT_REQUEST = `
   pcs.head_approved_at AS po_head_approved_at
 `;
 
-function requestQuery(where = '', order = 'ORDER BY er.updated_at DESC, er.id DESC') {
+function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
+    WHEN 'Vivid Approved' THEN 1
+    WHEN 'ABB Approval' THEN 2
+    ELSE 3
+  END, er.updated_at DESC, er.id DESC`) {
   return `
     SELECT ${SELECT_REQUEST}
     FROM estimation_requests er
@@ -125,6 +131,33 @@ async function listEstimationRequests(user) {
     result = await pool.query(requestQuery('WHERE er.requested_by_name = $1 OR er.sales_owner_name = $1 OR er.sales_owner_id = $2'), [actorName(user), user?.id || null]);
   }
   return result.rows;
+}
+
+async function updateEnquiryState(id, data, user) {
+  const request = await getRequest(id, user);
+  const enquiryState = text(data.enquiry_state, 'Enquiry state', 20, true);
+  if (!['Purchase', 'Tender', 'Budget'].includes(enquiryState)) {
+    throw appError('Enquiry state must be Purchase, Tender, or Budget.');
+  }
+  if (request.enquiry_state === enquiryState) return request;
+
+  await pool.query(
+    `UPDATE leads
+     SET enquiry_state = $1
+     WHERE id = $2`,
+    [enquiryState, request.lead_id],
+  );
+  await pool.query(
+    `UPDATE estimation_requests
+     SET updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1`,
+    [id],
+  );
+  await logLeadActivity(request.lead_id, {
+    activity_type: 'system',
+    content: `Enquiry state changed from ${request.enquiry_state || 'Purchase'} to ${enquiryState}`,
+  }, user);
+  return getRequest(id, user);
 }
 
 async function submitLeadToEstimation(leadId, user) {
@@ -962,4 +995,5 @@ module.exports = {
   requestRevision,
   submitForReview,
   submitLeadToEstimation,
+  updateEnquiryState,
 };

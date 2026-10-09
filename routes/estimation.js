@@ -17,6 +17,7 @@ const {
   submitForReview,
   submitLeadToEstimation,
   upsertPoSheet,
+  updateEnquiryState,
 } = require('../services/estimationService');
 const { optionalUser, requireRoles } = require('../middleware/auth');
 
@@ -113,6 +114,14 @@ router.post('/:id/assign', async (req, res) => {
     res.json(await assignRequest(req.params.id, req.body, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to assign estimation request', error);
+  }
+});
+
+router.patch('/:id/enquiry-state', async (req, res) => {
+  try {
+    res.json(await updateEnquiryState(req.params.id, req.body, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to update enquiry state', error);
   }
 });
 

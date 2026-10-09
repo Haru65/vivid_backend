@@ -15,6 +15,10 @@ async function createLeadSchema() {
       contact_person_email VARCHAR(255) NOT NULL,
       contact_person_phone VARCHAR(20) NOT NULL,
       enquiry_date DATE NOT NULL,
+      enquiry_state VARCHAR(20) NOT NULL DEFAULT 'Purchase'
+        CHECK (enquiry_state IN ('Purchase', 'Tender', 'Budget')),
+      sales_approval_status VARCHAR(30) NOT NULL DEFAULT 'Not Vivid Approved'
+        CHECK (sales_approval_status IN ('Vivid Approved', 'ABB Approval', 'Not Vivid Approved')),
       priority VARCHAR(20) NOT NULL DEFAULT 'Medium'
         CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
       customer_id INTEGER,
@@ -44,6 +48,8 @@ async function createLeadSchema() {
     ALTER TABLE leads
     ADD COLUMN IF NOT EXISTS quotation VARCHAR(255),
     ADD COLUMN IF NOT EXISTS enquiry_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    ADD COLUMN IF NOT EXISTS enquiry_state VARCHAR(20) NOT NULL DEFAULT 'Purchase',
+    ADD COLUMN IF NOT EXISTS sales_approval_status VARCHAR(30) NOT NULL DEFAULT 'Not Vivid Approved',
     ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'Medium',
     ADD COLUMN IF NOT EXISTS customer_id INTEGER,
     ADD COLUMN IF NOT EXISTS segment VARCHAR(100),
@@ -58,6 +64,22 @@ async function createLeadSchema() {
     ADD COLUMN IF NOT EXISTS current_assignee_id BIGINT,
     ADD COLUMN IF NOT EXISTS current_department VARCHAR(100) NOT NULL DEFAULT 'Sales',
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+  `);
+
+  await pool.query(`
+    ALTER TABLE leads
+    DROP CONSTRAINT IF EXISTS leads_enquiry_state_check;
+    ALTER TABLE leads
+    ADD CONSTRAINT leads_enquiry_state_check
+    CHECK (enquiry_state IN ('Purchase', 'Tender', 'Budget'));
+  `);
+
+  await pool.query(`
+    ALTER TABLE leads
+    DROP CONSTRAINT IF EXISTS leads_sales_approval_status_check;
+    ALTER TABLE leads
+    ADD CONSTRAINT leads_sales_approval_status_check
+    CHECK (sales_approval_status IN ('Vivid Approved', 'ABB Approval', 'Not Vivid Approved'));
   `);
 
   await pool.query(`
