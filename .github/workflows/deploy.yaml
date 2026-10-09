@@ -19,114 +19,126 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # STEP 1: Validate SSH secrets
-      - name: Validate SSH Configuration
+      # STEP 1: Configure secure SSH
+      - name: Configure SSH
         shell: bash
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          VPS_HOST_FINGERPRINT: ${{ secrets.VPS_HOST_FINGERPRINT }}
+          EXPECTED_FP: ${{ secrets.VPS_HOST_FINGERPRINT }}
         run: |
           set -euo pipefail
 
-          for name in VPS_HOST VPS_USER VPS_SSH_KEY VPS_HOST_FINGERPRINT; do
-            if [ -z "${!name}" ]; then
-              echo "ERROR: $name is missing"
-              exit 1
-            fi
-          done
+          : "${VPS_HOST:?VPS_HOST missing}"
+          : "${VPS_USER:?VPS_USER missing}"
+          : "${VPS_SSH_KEY:?VPS_SSH_KEY missing}"
+          : "${EXPECTED_FP:?VPS_HOST_FINGERPRINT missing}"
 
-          if [[ "$VPS_HOST" =~ [[:space:]/:] ]]; then
-            echo "ERROR: VPS_HOST has an invalid format"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Store private key securely
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # Fetch only the ED25519 host key
+          echo "Scanning VPS ED25519 host key..."
+
+          ssh-keyscan -T 15 -p 22 -t ed25519 \
+            "$VPS_HOST" 2>/dev/null \
+            > /tmp/vps_host_keys || true
+
+          if [ ! -s /tmp/vps_host_keys ]; then
+            echo "ERROR: Could not fetch ED25519 host key"
             exit 1
           fi
 
-          if [[ ! "$VPS_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]; then
-            echo "ERROR: Invalid fingerprint format"
-            echo "Expected the complete SHA256 fingerprint only"
-            exit 1
-          fi
+          # Trust only keys matching verified fingerprint
+          : > ~/.ssh/known_hosts_deploy
 
-          echo "SSH configuration validated"
-
-      # STEP 2: Diagnose SSH host keys
-      - name: Diagnose SSH Fingerprint
-        shell: bash
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          EXPECTED: ${{ secrets.VPS_HOST_FINGERPRINT }}
-        run: |
-          set -euo pipefail
-
-          echo "Scanning SSH host keys..."
-
-          ssh-keyscan -T 10 -p 22 \
-            -t rsa,ecdsa,ed25519 \
-            "$VPS_HOST" 2>/dev/null > /tmp/hostkeys || true
-
-          if [ ! -s /tmp/hostkeys ]; then
-            echo "ERROR: No SSH host keys received"
-            exit 1
-          fi
-
-          echo "Host key algorithms returned:"
-          awk '{print $2}' /tmp/hostkeys | sort -u
-
-          echo "Comparing fingerprints..."
-
-          matched=false
-
-          while IFS= read -r line; do
-            fp=$(printf '%s\n' "$line" |
+          while IFS= read -r hostkey; do
+            fingerprint=$(printf '%s\n' "$hostkey" |
               ssh-keygen -lf - -E sha256 |
               awk '{print $2}')
 
-            algorithm=$(printf '%s\n' "$line" | awk '{print $2}')
-
-            if [ "$fp" = "$EXPECTED" ]; then
-              echo "MATCH FOUND for $algorithm"
-              matched=true
-            else
-              echo "No match for $algorithm"
+            if [ "$fingerprint" = "$EXPECTED_FP" ]; then
+              printf '%s\n' "$hostkey" \
+                >> ~/.ssh/known_hosts_deploy
             fi
-          done < /tmp/hostkeys
+          done < /tmp/vps_host_keys
 
-          if [ "$matched" = false ]; then
-            echo "ERROR: Fingerprint secret does not match the scanned host keys"
-            echo "Verify the server IP, SSH port, and GitHub secret"
+          if [ ! -s ~/.ssh/known_hosts_deploy ]; then
+            echo "ERROR: ED25519 fingerprint mismatch"
             exit 1
           fi
 
-          echo "Fingerprint diagnostic passed"
-          echo "Note: SSH may negotiate a different host-key algorithm"
+          chmod 600 ~/.ssh/known_hosts_deploy
+
+          echo "ED25519 fingerprint verified successfully"
+
+      # STEP 2: Test SSH connection
+      - name: Test SSH Connection
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts_deploy" \
+            -o HostKeyAlgorithms=ssh-ed25519 \
+            -o ConnectTimeout=30 \
+            -p 22 \
+            "$VPS_USER@$VPS_HOST" \
+            "echo 'SSH connection successful'; whoami"
 
       # STEP 3: Deploy backend
       - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          fingerprint: ${{ secrets.VPS_HOST_FINGERPRINT }}
-          port: 22
-          timeout: 30s
-          command_timeout: 10m
-          script: |
-            set -e
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          timeout 10m ssh \
+            -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts_deploy" \
+            -o HostKeyAlgorithms=ssh-ed25519 \
+            -o ConnectTimeout=30 \
+            -p 22 \
+            "$VPS_USER@$VPS_HOST" 'bash -se' <<'REMOTE'
 
-            echo "Starting deployment..."
+          set -euo pipefail
 
-            cd /var/www/zeptac/data/www/vividapi.zeptac.com/vivid_backend
+          echo "Starting deployment..."
 
-            echo "Fetching latest changes..."
-            git fetch origin main
-            git reset --hard origin/main
+          cd /var/www/zeptac/data/www/vividapi.zeptac.com/vivid_backend
 
-            echo "Installing dependencies..."
-            npm ci --omit=dev
+          echo "Fetching latest changes..."
+          git fetch origin main
+          git reset --hard origin/main
 
-            echo "Restarting PM2..."
-            pm2 restart vivid --update-env
+          echo "Installing dependencies..."
+          npm ci --omit=dev
 
-            echo "Deployment completed successfully!"
+          echo "Restarting PM2..."
+          pm2 restart vivid --update-env
+
+          echo "Deployment completed successfully!"
+
+          REMOTE
+
+      # STEP 4: Clean up credentials
+      - name: Clean up SSH credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -f ~/.ssh/deploy_key
+          rm -f ~/.ssh/known_hosts_deploy
+          rm -f /tmp/vps_host_keys
