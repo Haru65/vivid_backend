@@ -1,0 +1,43 @@
+
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          fingerprint: ${{ secrets.VPS_HOST_FINGERPRINT }}
+          port: 22
+          command_timeout: 10m
+          script: |
+            set -e
+
+            cd /var/www/zeptac/data/www/vividapi.zeptac.com/vivid_backend
+
+            git fetch origin main
+            git reset --hard origin/main
+
+            npm ci --omit=dev
+
+            pm2 restart vivid --update-env
+
+            echo "Deployment completed!"

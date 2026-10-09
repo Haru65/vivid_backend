@@ -34,7 +34,7 @@ app.use((req, res, next) => {
 
   res.header(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-User-Name, X-User-Role'
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-User-Name, X-User-Role '
   );
 
   res.header(
