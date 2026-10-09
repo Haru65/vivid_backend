@@ -20,36 +20,7 @@ jobs:
 
     steps:
       # STEP 1: Verify SSH secrets
-      - name: Verify SSH configuration
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          VPS_HOST_FINGERPRINT: ${{ secrets.VPS_HOST_FINGERPRINT }}
-        run: |
-          if [ -z "$VPS_HOST" ]; then
-            echo "ERROR: VPS_HOST is missing"
-            exit 1
-          fi
-
-          if [ -z "$VPS_USER" ]; then
-            echo "ERROR: VPS_USER is missing"
-            exit 1
-          fi
-
-          if [ -z "$VPS_SSH_KEY" ]; then
-            echo "ERROR: VPS_SSH_KEY is missing"
-            exit 1
-          fi
-
-          if [ -z "$VPS_HOST_FINGERPRINT" ]; then
-            echo "ERROR: VPS_HOST_FINGERPRINT is missing"
-            exit 1
-          fi
-
-          echo "All SSH secrets are configured"
-
-      # STEP 2: Deploy application
+      
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.5
         with:

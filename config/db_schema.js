@@ -65,8 +65,10 @@ async function createLeadSchema() {
     ADD COLUMN IF NOT EXISTS current_department VARCHAR(100) NOT NULL DEFAULT 'Sales',
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
-    
+
   `);
+
+  
 
   await pool.query(`
     ALTER TABLE leads
