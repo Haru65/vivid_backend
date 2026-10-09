@@ -19,6 +19,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # STEP 1: Verify SSH secrets
+      - name: Verify SSH configuration
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST_FINGERPRINT: ${{ secrets.VPS_HOST_FINGERPRINT }}
+        run: |
+          if [ -z "$VPS_HOST" ]; then
+            echo "ERROR: VPS_HOST is missing"
+            exit 1
+          fi
+
+          if [ -z "$VPS_USER" ]; then
+            echo "ERROR: VPS_USER is missing"
+            exit 1
+          fi
+
+          if [ -z "$VPS_SSH_KEY" ]; then
+            echo "ERROR: VPS_SSH_KEY is missing"
+            exit 1
+          fi
+
+          if [ -z "$VPS_HOST_FINGERPRINT" ]; then
+            echo "ERROR: VPS_HOST_FINGERPRINT is missing"
+            exit 1
+          fi
+
+          echo "All SSH secrets are configured"
+
+      # STEP 2: Deploy application
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.5
         with:
@@ -31,13 +62,18 @@ jobs:
           script: |
             set -e
 
+            echo "Starting deployment..."
+
             cd /var/www/zeptac/data/www/vividapi.zeptac.com/vivid_backend
 
+            echo "Fetching latest changes..."
             git fetch origin main
             git reset --hard origin/main
 
+            echo "Installing dependencies..."
             npm ci --omit=dev
 
+            echo "Restarting PM2..."
             pm2 restart vivid --update-env
 
-            echo "Deployment completed!"
+            echo "Deployment completed successfully!"
