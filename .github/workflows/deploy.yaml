@@ -1,3 +1,4 @@
+
 name: Deploy Backend
 
 on:
@@ -18,34 +19,89 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # STEP 1: Validate SSH secrets
       - name: Validate SSH Configuration
+        shell: bash
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST_FINGERPRINT: ${{ secrets.VPS_HOST_FINGERPRINT }}
         run: |
-          test -n "$VPS_HOST" || {
-            echo "ERROR: VPS_HOST missing"
-            exit 1
-          }
+          set -euo pipefail
 
-          test -n "$VPS_USER" || {
-            echo "ERROR: VPS_USER missing"
-            exit 1
-          }
-
-          test -n "$VPS_SSH_KEY" || {
-            echo "ERROR: VPS_SSH_KEY missing"
-            exit 1
-          }
+          for name in VPS_HOST VPS_USER VPS_SSH_KEY VPS_HOST_FINGERPRINT; do
+            if [ -z "${!name}" ]; then
+              echo "ERROR: $name is missing"
+              exit 1
+            fi
+          done
 
           if [[ "$VPS_HOST" =~ [[:space:]/:] ]]; then
             echo "ERROR: VPS_HOST has an invalid format"
             exit 1
           fi
 
-          echo "SSH secrets are configured"
+          if [[ ! "$VPS_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]; then
+            echo "ERROR: Invalid fingerprint format"
+            echo "Expected the complete SHA256 fingerprint only"
+            exit 1
+          fi
 
+          echo "SSH configuration validated"
+
+      # STEP 2: Diagnose SSH host keys
+      - name: Diagnose SSH Fingerprint
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          EXPECTED: ${{ secrets.VPS_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+
+          echo "Scanning SSH host keys..."
+
+          ssh-keyscan -T 10 -p 22 \
+            -t rsa,ecdsa,ed25519 \
+            "$VPS_HOST" 2>/dev/null > /tmp/hostkeys || true
+
+          if [ ! -s /tmp/hostkeys ]; then
+            echo "ERROR: No SSH host keys received"
+            exit 1
+          fi
+
+          echo "Host key algorithms returned:"
+          awk '{print $2}' /tmp/hostkeys | sort -u
+
+          echo "Comparing fingerprints..."
+
+          matched=false
+
+          while IFS= read -r line; do
+            fp=$(printf '%s\n' "$line" |
+              ssh-keygen -lf - -E sha256 |
+              awk '{print $2}')
+
+            algorithm=$(printf '%s\n' "$line" | awk '{print $2}')
+
+            if [ "$fp" = "$EXPECTED" ]; then
+              echo "MATCH FOUND for $algorithm"
+              matched=true
+            else
+              echo "No match for $algorithm"
+            fi
+          done < /tmp/hostkeys
+
+          if [ "$matched" = false ]; then
+            echo "ERROR: Fingerprint secret does not match the scanned host keys"
+            echo "Verify the server IP, SSH port, and GitHub secret"
+            exit 1
+          fi
+
+          echo "Fingerprint diagnostic passed"
+          echo "Note: SSH may negotiate a different host-key algorithm"
+
+      # STEP 3: Deploy backend
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.2.5
         with:
@@ -54,6 +110,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           fingerprint: ${{ secrets.VPS_HOST_FINGERPRINT }}
           port: 22
+          timeout: 30s
           command_timeout: 10m
           script: |
             set -e
@@ -62,14 +119,14 @@ jobs:
 
             cd /var/www/zeptac/data/www/vividapi.zeptac.com/vivid_backend
 
-            echo "Fetching changes..."
+            echo "Fetching latest changes..."
             git fetch origin main
             git reset --hard origin/main
 
             echo "Installing dependencies..."
             npm ci --omit=dev
 
-            echo "Restarting backend..."
+            echo "Restarting PM2..."
             pm2 restart vivid --update-env
 
-            echo "Deployment successful!"
+            echo "Deployment completed successfully!"
