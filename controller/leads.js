@@ -1,5 +1,6 @@
 const pool = require('../config/db_connection');
 const { getMasterSettings } = require('./settings');
+const { notifyUserId } = require('../services/notificationService');
 
 const LEAD_COLUMNS = `
   id,
@@ -126,6 +127,30 @@ function canAccessLead(lead, user) {
   if (!isIndividualSales(user)) return true;
   return String(lead?.sales_owner_id || '') === String(user?.id || '')
     || String(lead?.assigned_to || '').trim() === actorName(user);
+}
+
+async function resolveSalesOwner(data, user, db = pool) {
+  if (isIndividualSales(user)) {
+    return { id: Number(user.id), name: actorName(user) };
+  }
+  if (!['admin', 'sales_head'].includes(roleOf(user))) {
+    throw Object.assign(new Error('Only Sales Head or Admin can assign leads.'), { statusCode: 403 });
+  }
+  const ownerId = Number(data.sales_owner_id);
+  if (!Number.isInteger(ownerId) || ownerId <= 0) throw validationError('Select a sales person to assign this lead.');
+  const result = await db.query(
+    `SELECT id, first_name, last_name
+     FROM users
+     WHERE id = $1
+       AND is_active = TRUE
+       AND role IN ('salesperson', 'sales_engineer')`,
+    [ownerId],
+  );
+  if (!result.rows[0]) throw validationError('Select an active salesperson or sales engineer.');
+  return {
+    id: Number(result.rows[0].id),
+    name: [result.rows[0].first_name, result.rows[0].last_name].filter(Boolean).join(' '),
+  };
 }
 
 
@@ -658,18 +683,20 @@ async function ensureCustomerForLead(client, lead) {
 }
 
 async function createLead(leadData, user) {
-  const ownedLeadData = { ...leadData, assigned_to: actorName(user) };
-  await ensureLeadSourceAllowed(ownedLeadData.lead_source);
-  const values = leadValues(ownedLeadData);
-  if (QUOTATION_REQUIRED_STATUSES.has(values[14])) {
-    throw validationError(`Create the lead and send a quotation before moving it to ${values[14]}.`);
-  }
-
   const client = await pool.connect();
   let lead;
   let customerState;
+  let owner;
   try {
     await client.query('BEGIN');
+    owner = await resolveSalesOwner(leadData, user, client);
+    const ownedLeadData = { ...leadData, assigned_to: owner.name };
+    await ensureLeadSourceAllowed(ownedLeadData.lead_source);
+    const values = leadValues(ownedLeadData);
+    if (QUOTATION_REQUIRED_STATUSES.has(values[14])) {
+      throw validationError(`Create the lead and send a quotation before moving it to ${values[14]}.`);
+    }
+    const insertValues = [...values.slice(0, 17), owner.id, owner.id, ...values.slice(17)];
     const result = await client.query(
       `INSERT INTO leads (
         company_name,
@@ -689,12 +716,14 @@ async function createLead(leadData, user) {
         lead_status,
         requirements_summary,
         assigned_to,
+        sales_owner_id,
+        current_assignee_id,
         raw_data,
         enquiry_state,
         sales_approval_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       RETURNING ${LEAD_COLUMNS}`,
-      values,
+      insertValues,
     );
     lead = result.rows[0];
     customerState = await ensureCustomerForLead(client, lead);
@@ -708,7 +737,7 @@ async function createLead(leadData, user) {
 
   await logLeadActivity(lead.id, {
     activity_type: 'system',
-    content: `Lead created for ${lead.company_name}`,
+    content: `Lead created for ${lead.company_name} and assigned to ${owner.name}`,
   }, user);
   await logLeadActivity(lead.id, {
     activity_type: 'system',
@@ -716,31 +745,52 @@ async function createLead(leadData, user) {
       ? `Customer account created for ${customerState.customer.company_name}`
       : `Customer account linked to existing ${customerState.customer.company_name}`,
   }, user);
+  if (String(owner.id) !== String(user?.id || '')) {
+    await notifyUserId(owner.id, {
+      title: 'New lead assigned to you',
+      body: `${actorName(user)} assigned ${lead.company_name} to you.`,
+      category: 'lead',
+      link_type: 'lead',
+      link_id: lead.id,
+    });
+  }
 
   return (await retrieveLead(lead.id)) || lead;
 }
 
 async function updateLead(id, leadData, user) {
-  const previousResult = await pool.query(
-    `SELECT ${LEAD_COLUMNS}
-     FROM leads
-     WHERE id = $1`,
-    [id],
-  );
-  const previous = previousResult.rows[0];
-  if (!previous) return null;
-  if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
+  const client = await pool.connect();
+  let previous;
+  let lead;
+  let owner;
+  try {
+    await client.query('BEGIN');
+    const previousResult = await client.query(
+      `SELECT ${LEAD_COLUMNS}
+       FROM leads
+       WHERE id = $1
+       FOR UPDATE`,
+      [id],
+    );
+    previous = previousResult.rows[0];
+    if (!previous) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+    if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
 
-  const ownedLeadData = isIndividualSales(user) ? { ...leadData, assigned_to: actorName(user) } : leadData;
-  await ensureLeadSourceAllowed(ownedLeadData.lead_source, previous.lead_source);
-  const values = leadValues(ownedLeadData);
-  await ensureLeadStatusAllowed({
-    ...previous,
-    quotation: values[12] || previous.quotation,
-  }, values[14]);
+    owner = await resolveSalesOwner(leadData, user, client);
+    const ownedLeadData = { ...leadData, assigned_to: owner.name };
+    await ensureLeadSourceAllowed(ownedLeadData.lead_source, previous.lead_source);
+    const values = leadValues(ownedLeadData);
+    await ensureLeadStatusAllowed({
+      ...previous,
+      quotation: values[12] || previous.quotation,
+    }, values[14]);
+    const updateValues = [...values.slice(0, 17), owner.id, owner.id, ...values.slice(17), id];
 
-  const result = await pool.query(
-    `UPDATE leads
+    const result = await client.query(
+      `UPDATE leads
      SET company_name = $1,
          contact_person_name = $2,
          contact_person_email = $3,
@@ -758,20 +808,53 @@ async function updateLead(id, leadData, user) {
          lead_status = $15,
          requirements_summary = $16,
          assigned_to = $17,
-         raw_data = $18,
-         enquiry_state = $19,
-         sales_approval_status = $20
-     WHERE id = $21
+         sales_owner_id = $18,
+         current_assignee_id = $19,
+         raw_data = $20,
+         enquiry_state = $21,
+         sales_approval_status = $22,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $23
      RETURNING ${LEAD_COLUMNS}`,
-    [...values, id],
-  );
-  const lead = result.rows[0] || null;
-  if (!lead) return null;
+      updateValues,
+    );
+    lead = result.rows[0] || null;
+    if (!lead) throw new Error('Lead update failed.');
+
+    if (changed(previous, lead, 'assigned_to') || String(previous.sales_owner_id || '') !== String(owner.id)) {
+      await client.query(
+        `UPDATE estimation_requests
+         SET sales_owner_id = $1,
+             sales_owner_name = $2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = $3
+           AND status NOT IN ('cancelled', 'discarded')`,
+        [owner.id, owner.name, id],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 
   await Promise.all(leadUpdateActivities(previous, lead).map((content) => logLeadActivity(lead.id, {
     activity_type: 'system',
     content,
   }, user)));
+
+  if ((changed(previous, lead, 'assigned_to') || String(previous.sales_owner_id || '') !== String(owner.id))
+    && String(owner.id) !== String(user?.id || '')) {
+    await notifyUserId(owner.id, {
+      title: 'Lead assigned to you',
+      body: `${actorName(user)} assigned ${lead.company_name} to you.`,
+      category: 'lead',
+      link_type: 'lead',
+      link_id: lead.id,
+    });
+  }
 
   return (await retrieveLead(lead.id)) || lead;
 }

@@ -312,10 +312,13 @@ async function assignRequest(id, data, user) {
 async function createOrUpdateRequestQuotation(id, data, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
+  const selfAssigningHead = request.status === 'submitted'
+    && !request.assigned_engineer_id
+    && isEstimationHead(user);
   if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can prepare this quotation.', 403);
   }
-  if (!['assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status)) {
+  if (!selfAssigningHead && !['assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status)) {
     throw appError('This estimation request is not ready for quotation preparation.');
   }
 
@@ -333,12 +336,15 @@ async function createOrUpdateRequestQuotation(id, data, user) {
      SET quotation_id = $1,
          assigned_engineer_id = COALESCE(assigned_engineer_id, $2),
          assigned_engineer_name = COALESCE(assigned_engineer_name, $3),
+         estimation_head_id = CASE WHEN $5 THEN COALESCE(estimation_head_id, $2) ELSE estimation_head_id END,
+         estimation_head_name = CASE WHEN $5 THEN COALESCE(estimation_head_name, $3) ELSE estimation_head_name END,
+         assigned_at = CASE WHEN $5 THEN COALESCE(assigned_at, CURRENT_TIMESTAMP) ELSE assigned_at END,
          status = CASE WHEN status IN ('revision_requested_by_sales', 'revision_in_progress') THEN 'revision_in_progress' ELSE 'in_progress' END,
          engineer_started_at = COALESCE(engineer_started_at, CURRENT_TIMESTAMP),
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $4
      RETURNING *`,
-    [quotation.id, user?.id || null, actorName(user), id],
+    [quotation.id, user?.id || null, actorName(user), id, selfAssigningHead],
   );
   await pool.query(
     `UPDATE quotations
@@ -350,7 +356,9 @@ async function createOrUpdateRequestQuotation(id, data, user) {
   );
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Estimation quotation ${quotation.quotation_number} prepared by ${actorName(user)}`,
+    content: selfAssigningHead
+      ? `Estimation self-assigned to ${actorName(user)} and quotation ${quotation.quotation_number} prepared`
+      : `Estimation quotation ${quotation.quotation_number} prepared by ${actorName(user)}`,
   }, user);
   return getRequest(updated.rows[0].id, user);
 }
