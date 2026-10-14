@@ -98,6 +98,7 @@ function handoverSelect(whereClause = '', orderClause = 'ORDER BY h.created_at D
       q.total_amount AS quotation_total,
       q.status AS quotation_status,
       l.assigned_to AS sales_owner,
+      NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
       p.project_number,
       p.status AS project_status,
       p.overall_progress AS project_progress
@@ -116,6 +117,7 @@ async function quotationBundle(client, quotationId, lock = false) {
     `SELECT q.*,
       l.lead_status,
       l.assigned_to,
+      NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
       l.requirements_summary,
       c.id AS customer_id,
       c.company_name AS customer_company_name,
@@ -128,9 +130,10 @@ async function quotationBundle(client, quotationId, lock = false) {
      LEFT JOIN LATERAL (
        SELECT *
        FROM customers c
-       WHERE c.source_lead_id = l.id
+       WHERE c.id = l.customer_id
+          OR c.source_lead_id = l.id
           OR LOWER(c.company_name) = LOWER(q.company_name)
-       ORDER BY CASE WHEN c.source_lead_id = l.id THEN 0 ELSE 1 END, c.id
+       ORDER BY CASE WHEN c.id = l.customer_id THEN 0 WHEN c.source_lead_id = l.id THEN 1 ELSE 2 END, c.id
        LIMIT 1
      ) c ON TRUE
      WHERE q.id = $1
@@ -141,7 +144,9 @@ async function quotationBundle(client, quotationId, lock = false) {
 }
 
 function canAccessBundle(bundle, user) {
-  return !['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role)) || bundle.assigned_to === user.name;
+  return !['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role))
+    || String(bundle.sales_owner_id || '') === String(user?.id || '')
+    || (!bundle.sales_owner_id && bundle.assigned_to === user.name);
 }
 
 async function checkHandoverEligibility({
@@ -192,6 +197,19 @@ async function checkHandoverEligibility({
     [quotationId],
   );
   if (pendingNegotiation.rows[0]) blockers.push('Negotiation approval is still pending.');
+
+  const poApproval = await client.query(
+    `SELECT er.status AS estimation_status, pcs.status AS po_status
+     FROM estimation_requests er
+     LEFT JOIN po_closure_sheets pcs ON pcs.id = er.po_closure_sheet_id
+     WHERE er.quotation_id = $1
+     ORDER BY er.updated_at DESC, er.id DESC
+     LIMIT 1`,
+    [quotationId],
+  );
+  if (poApproval.rows[0] && poApproval.rows[0].po_status !== 'approved_by_estimation_head') {
+    blockers.push('PO closure sheet must be approved by Estimation Head before ERP handover.');
+  }
 
   const duplicateParams = [quotationId];
   let duplicateWhere = `quotation_id = $1 AND status NOT IN ('rejected', 'cancelled')`;
@@ -388,9 +406,10 @@ async function createHandover(data, user) {
         customer_po_number,
         customer_po_date,
         snapshot,
+        created_by_user_id,
         created_by_name,
         created_by_role
-      ) VALUES ($1, $2, $3, $4, $5, 'ready', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      ) VALUES ($1, $2, $3, $4, $5, 'ready', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       RETURNING *`,
       [
         handoverNumber,
@@ -407,6 +426,7 @@ async function createHandover(data, user) {
         values.customerPoNumber || eligibility.quotation.customer_po_number,
         values.customerPoDate || eligibility.quotation.customer_po_date,
         JSON.stringify(snapshot),
+        user?.id || null,
         actorName(user),
         user?.role || null,
       ],
@@ -434,8 +454,11 @@ async function listHandovers(user) {
   const params = [];
   let where = '';
   if (['salesperson', 'sales_engineer'].includes(role)) {
-    params.push(actorName(user));
-    where = 'WHERE h.created_by_name = $1 OR l.assigned_to = $1';
+    params.push(user?.id || null, actorName(user));
+    where = `WHERE h.created_by_user_id = $1
+      OR (h.created_by_user_id IS NULL AND h.created_by_name = $2)
+      OR NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1
+      OR (NULLIF(to_jsonb(l)->>'sales_owner_id', '') IS NULL AND l.assigned_to = $2)`;
   }
   const result = await pool.query(handoverSelect(where), params);
   return result.rows;
@@ -445,7 +468,11 @@ async function getHandover(id, user) {
   const result = await pool.query(handoverSelect('WHERE h.id = $1', ''), [id]);
   const handover = result.rows[0];
   if (!handover) throw appError('Handover not found.', 404);
-  if (['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role)) && handover.created_by_name !== actorName(user) && handover.sales_owner !== actorName(user)) {
+  const ownsHandover = String(handover.created_by_user_id || '') === String(user?.id || '')
+    || (!handover.created_by_user_id && handover.created_by_name === actorName(user));
+  const ownsLead = String(handover.sales_owner_id || '') === String(user?.id || '')
+    || (!handover.sales_owner_id && handover.sales_owner === actorName(user));
+  if (['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role)) && !ownsHandover && !ownsLead) {
     throw appError('You can view only your own handovers.', 403);
   }
   return handover;
@@ -461,6 +488,13 @@ async function updateHandover(id, data, user) {
     const handover = existing.rows[0];
     if (!handover) throw appError('Handover not found.', 404);
     if (!EDITABLE_STATUSES.has(handover.status)) throw appError(`Cannot edit a ${handover.status} handover.`, 409);
+    const existingQuotation = await quotationBundle(client, handover.quotation_id);
+    if (!existingQuotation || !canAccessBundle(existingQuotation, user)) {
+      throw appError('You can update only handovers for your assigned leads.', 403);
+    }
+    if (Number(values.quotationId) !== Number(handover.quotation_id)) {
+      throw appError('The quotation linked to a handover cannot be changed.', 409);
+    }
 
     await client.query(
       `UPDATE quotations
@@ -608,6 +642,14 @@ async function acceptHandover(id, data, user) {
     if (handover.project_id) throw appError('Project already exists for this handover.', 409);
 
     const project = await createProjectFromHandover(client, handover, user, data);
+    await client.query(
+      `UPDATE customers
+       SET total_orders = total_orders + 1,
+           lifetime_value = lifetime_value + $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [Number(handover.snapshot?.order?.order_value || 0), handover.customer_id],
+    );
     await client.query(
       `UPDATE crm_erp_handovers
        SET status = 'project_created',

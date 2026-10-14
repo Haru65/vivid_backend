@@ -31,6 +31,7 @@ async function createLeadSchema() {
       quotation VARCHAR(255),
       lead_source VARCHAR(255) NOT NULL,
       lead_status VARCHAR(50) NOT NULL,
+      loss_reason VARCHAR(255),
       requirements_summary TEXT,
       assigned_to VARCHAR(255),
       sales_owner_id BIGINT,
@@ -59,6 +60,7 @@ async function createLeadSchema() {
     ADD COLUMN IF NOT EXISTS enquiry_notes TEXT,
     ADD COLUMN IF NOT EXISTS industry_type VARCHAR(100),
     ADD COLUMN IF NOT EXISTS enquiry_number VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS loss_reason VARCHAR(255),
     ADD COLUMN IF NOT EXISTS sales_owner_id BIGINT,
     ADD COLUMN IF NOT EXISTS current_stage VARCHAR(50) NOT NULL DEFAULT 'enquiry',
     ADD COLUMN IF NOT EXISTS current_assignee_id BIGINT,
@@ -197,6 +199,8 @@ async function createCustomerSchema() {
       state VARCHAR(100),
       amc_status VARCHAR(20) NOT NULL DEFAULT 'None'
         CHECK (amc_status IN ('None', 'Active', 'Due', 'Expired')),
+      amc_start_date DATE,
+      amc_end_date DATE,
       total_orders INTEGER NOT NULL DEFAULT 0 CHECK (total_orders >= 0),
       lifetime_value NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (lifetime_value >= 0),
       customer_since DATE DEFAULT CURRENT_DATE,
@@ -205,6 +209,8 @@ async function createCustomerSchema() {
       -- Kept as an application-managed reference because the deployment role
       -- may not have REFERENCES privilege on the existing leads table.
       source_lead_id INTEGER,
+      created_by_user_id BIGINT,
+      created_by_name VARCHAR(255),
       raw_data JSONB
     );
   `);
@@ -220,7 +226,11 @@ async function createCustomerSchema() {
     ADD COLUMN IF NOT EXISTS contact_person_email VARCHAR(255),
     ADD COLUMN IF NOT EXISTS billing_address TEXT,
     ADD COLUMN IF NOT EXISTS shipping_address TEXT,
-    ADD COLUMN IF NOT EXISTS state VARCHAR(100);
+    ADD COLUMN IF NOT EXISTS state VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS amc_start_date DATE,
+    ADD COLUMN IF NOT EXISTS amc_end_date DATE,
+    ADD COLUMN IF NOT EXISTS created_by_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS created_by_name VARCHAR(255);
   `);
 
   await pool.query(`
@@ -231,6 +241,12 @@ async function createCustomerSchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS customers_amc_status_idx
     ON customers (amc_status);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS customers_amc_end_date_idx
+    ON customers (amc_end_date)
+    WHERE amc_end_date IS NOT NULL;
   `);
 
   await pool.query(`
@@ -384,8 +400,10 @@ async function createNegotiationApprovalSchema() {
       record_id INTEGER NOT NULL,
       approval_type VARCHAR(50) NOT NULL,
       requested_by_name VARCHAR(255) NOT NULL,
+      requested_by_user_id BIGINT,
       requested_by_role VARCHAR(100),
       approver_name VARCHAR(255),
+      approver_user_id BIGINT,
       approver_role VARCHAR(100),
       status VARCHAR(30) NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested', 'cancelled')),
@@ -397,6 +415,19 @@ async function createNegotiationApprovalSchema() {
       rejected_at TIMESTAMPTZ,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE approval_requests
+    ADD COLUMN IF NOT EXISTS requested_by_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS approver_user_id BIGINT;
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS approval_requests_requester_user_idx
+    ON approval_requests (requested_by_user_id, requested_at DESC);
+    CREATE INDEX IF NOT EXISTS approval_requests_approver_user_idx
+    ON approval_requests (approver_user_id, requested_at DESC);
   `);
 
   await pool.query(`
@@ -509,11 +540,30 @@ async function createHandoverProjectSchema() {
       rejected_at TIMESTAMPTZ,
       rejection_reason TEXT,
       project_id INTEGER,
+      created_by_user_id BIGINT,
       created_by_name VARCHAR(255),
       created_by_role VARCHAR(100),
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE crm_erp_handovers
+    ADD COLUMN IF NOT EXISTS created_by_user_id BIGINT;
+  `);
+
+  await pool.query(`
+    UPDATE crm_erp_handovers h
+    SET created_by_user_id = u.id
+    FROM users u
+    WHERE h.created_by_user_id IS NULL
+      AND LOWER(TRIM(h.created_by_name)) = LOWER(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)))
+      AND 1 = (
+        SELECT COUNT(*)
+        FROM users candidate
+        WHERE LOWER(TRIM(CONCAT_WS(' ', candidate.first_name, candidate.last_name))) = LOWER(TRIM(h.created_by_name))
+      );
   `);
 
   await pool.query(`
@@ -583,6 +633,11 @@ async function createHandoverProjectSchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS handovers_status_idx
     ON crm_erp_handovers (status, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS handovers_created_by_user_idx
+    ON crm_erp_handovers (created_by_user_id, created_at DESC);
   `);
 
   await pool.query(`
@@ -732,9 +787,10 @@ async function createEstimationRequestSchema() {
   `);
 
   await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS estimation_requests_open_lead_idx
+    DROP INDEX IF EXISTS estimation_requests_open_lead_idx;
+    CREATE UNIQUE INDEX estimation_requests_open_lead_idx
     ON estimation_requests (lead_id)
-    WHERE status NOT IN ('cancelled', 'sent_to_client');
+    WHERE status NOT IN ('cancelled', 'discarded', 'sent_to_client');
   `);
 
   await pool.query(`
@@ -813,12 +869,33 @@ async function createMeetingSchema() {
       status VARCHAR(20) NOT NULL DEFAULT 'Scheduled'
         CHECK (status IN ('Scheduled', 'Completed', 'Cancelled')),
       owner_name VARCHAR(255) NOT NULL,
+      owner_user_id BIGINT,
       location VARCHAR(255),
       lead_id INTEGER,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       CONSTRAINT meetings_time_range_check CHECK (end_at > start_at)
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE meetings
+    ADD COLUMN IF NOT EXISTS owner_user_id BIGINT;
+  `);
+
+  await pool.query(`
+    UPDATE meetings m
+    SET owner_user_id = u.id
+    FROM users u
+    WHERE m.owner_user_id IS NULL
+      AND LOWER(TRIM(m.owner_name)) = LOWER(TRIM(CONCAT_WS(' ', u.first_name, u.last_name)))
+      AND u.is_active = TRUE
+      AND 1 = (
+        SELECT COUNT(*)
+        FROM users candidate
+        WHERE candidate.is_active = TRUE
+          AND LOWER(TRIM(CONCAT_WS(' ', candidate.first_name, candidate.last_name))) = LOWER(TRIM(m.owner_name))
+      );
   `);
 
   await pool.query(`
@@ -829,6 +906,11 @@ async function createMeetingSchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS meetings_owner_name_idx
     ON meetings (owner_name);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS meetings_owner_user_id_idx
+    ON meetings (owner_user_id);
   `);
 
   await pool.query(`

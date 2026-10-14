@@ -18,10 +18,16 @@ function samePerson(left, right) {
 }
 
 function isRequester(user, approval) {
+  if (approval?.requested_by_user_id !== null && approval?.requested_by_user_id !== undefined) {
+    return String(approval.requested_by_user_id) === String(user?.id || '');
+  }
   return samePerson(approval?.requested_by_name, actorName(user));
 }
 
 function isAssignedApprover(user, approval) {
+  if (approval?.approver_user_id !== null && approval?.approver_user_id !== undefined) {
+    return String(approval.approver_user_id) === String(user?.id || '');
+  }
   return samePerson(approval?.approver_name, actorName(user));
 }
 
@@ -63,8 +69,11 @@ function approvalSelect(whereClause = '', orderClause = 'ORDER BY ar.requested_a
 }
 
 async function listApprovals(user) {
-  const params = [actorName(user)];
-  const where = 'WHERE LOWER(TRIM(ar.requested_by_name)) = LOWER(TRIM($1)) OR LOWER(TRIM(COALESCE(ar.approver_name, \'\'))) = LOWER(TRIM($1))';
+  const params = [user?.id, actorName(user)];
+  const where = `WHERE ar.requested_by_user_id = $1
+    OR ar.approver_user_id = $1
+    OR (ar.requested_by_user_id IS NULL AND LOWER(TRIM(ar.requested_by_name)) = LOWER(TRIM($2)))
+    OR (ar.approver_user_id IS NULL AND LOWER(TRIM(COALESCE(ar.approver_name, ''))) = LOWER(TRIM($2)))`;
   const result = await pool.query(approvalSelect(where), params);
   return result.rows;
 }
@@ -131,6 +140,14 @@ function inferApprovalEmailType(approval) {
 async function findApproverEmail(client, approval) {
   const metadata = approval.metadata || {};
   if (metadata.approver_email) return metadata.approver_email;
+
+  if (approval.approver_user_id) {
+    const byId = await client.query(
+      'SELECT email FROM users WHERE id = $1 AND is_active = TRUE',
+      [approval.approver_user_id],
+    );
+    if (byId.rows[0]?.email) return byId.rows[0].email;
+  }
 
   const name = String(approval.approver_name || '').trim();
   if (!name) return null;

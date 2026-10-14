@@ -46,7 +46,7 @@ async function generateQuotationPdf(data = {}, user, options = {}) {
   const quotation = {
     reference: quotationData.quotationNumber || quotationData.quotation_number || "N/A",
 
-    date: new Date().toLocaleDateString("en-GB", {
+    date: new Date(quotationData.created_at || quotationData.sent_at || Date.now()).toLocaleDateString("en-GB", {
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
@@ -242,7 +242,11 @@ function drawPriceSchedulePages(pdfDoc, templateImage, quotationData, quotation,
   const lineItems = normalizePriceItems(quotationData.line_items);
   const rows = lineItems.length ? lineItems : [{ description: "No line items added", quantity: 0, unit_price: 0, amount: 0 }];
   const totalQuantity = rows.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
-  const totalAmount = rows.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const calculatedSubtotal = rows.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const subtotal = Number(quotationData.subtotal ?? calculatedSubtotal);
+  const discountAmount = Number(quotationData.discount_amount || 0);
+  const gstAmount = Number(quotationData.gst_amount || 0);
+  const totalAmount = Number(quotationData.final_price ?? quotationData.total_amount ?? (subtotal - discountAmount + gstAmount));
   const columns = [
     { key: "sr", label: "Sr.no.", x: 30, width: 42, align: "center" },
     { key: "item", label: "Item", x: 72, width: 335, align: "center" },
@@ -254,15 +258,14 @@ function drawPriceSchedulePages(pdfDoc, templateImage, quotationData, quotation,
   let page = createAnnexurePage(pdfDoc, templateImage, quotationData, quotation, layout, false);
   let cursorY = 612;
   let currentPageRows = [];
-  const minY = 190;
+  const minY = 260;
 
   rows.forEach((item, index) => {
     const descriptionLines = wrapText(item.description, layout.regularFont, 10.5, columns[1].width - 12);
     const rowHeight = Math.max(38, 22 + descriptionLines.length * 12);
 
     if (cursorY - rowHeight < minY && currentPageRows.length) {
-      drawTableTotalRow(page, columns, cursorY, totalQuantity, totalAmount, layout);
-      drawSignature(page, quotation, layout, cursorY - 34);
+      drawContinuationFooter(page, cursorY, layout);
       page = createAnnexurePage(pdfDoc, templateImage, quotationData, quotation, layout, true);
       cursorY = 612;
       currentPageRows = [];
@@ -279,8 +282,16 @@ function drawPriceSchedulePages(pdfDoc, templateImage, quotationData, quotation,
     cursorY -= rowHeight;
   });
 
-  drawTableTotalRow(page, columns, cursorY, totalQuantity, totalAmount, layout);
-  drawSignature(page, quotation, layout, cursorY - 34);
+  const summaryY = drawCommercialSummary(page, columns, cursorY, {
+    totalQuantity,
+    subtotal,
+    discountAmount,
+    gstAmount,
+    gstRate: Number(quotationData.gst_rate || 0),
+    totalAmount,
+  }, layout);
+  drawCommercialTerms(page, quotationData, layout, summaryY - 12);
+  drawSignature(page, quotation, layout, summaryY - 76);
 }
 
 function createAnnexurePage(pdfDoc, templateImage, quotationData, quotation, layout, continued) {
@@ -339,12 +350,57 @@ function drawPriceRow(page, columns, y, height, row, layout) {
   drawCellText(page, formatIndianNumber(row.amount), columns[4].x, y - height / 2 - 4, columns[4].width - 5, 10.5, layout.regularFont, "right");
 }
 
-function drawTableTotalRow(page, columns, y, totalQuantity, totalAmount, layout) {
+function drawSummaryRow(page, columns, y, label, value, layout, { quantity = '', bold = false } = {}) {
   const height = 18;
   drawTableGrid(page, columns, y, height);
-  drawCellText(page, formatQuantity(totalQuantity), columns[2].x, y - 13, columns[2].width, 11, layout.boldFont, "center");
-  drawCellText(page, "TOTAL", columns[3].x, y - 13, columns[3].width, 11, layout.boldFont, "center");
-  drawCellText(page, formatIndianNumber(totalAmount), columns[4].x, y - 13, columns[4].width - 5, 11, layout.boldFont, "right");
+  const font = bold ? layout.boldFont : layout.regularFont;
+  drawCellText(page, quantity, columns[2].x, y - 13, columns[2].width, 10.5, font, "center");
+  drawCellText(page, label, columns[3].x, y - 13, columns[3].width, 10.5, font, "center");
+  drawCellText(page, formatIndianNumber(value), columns[4].x, y - 13, columns[4].width - 5, 10.5, font, "right");
+  return y - height;
+}
+
+function drawCommercialSummary(page, columns, y, totals, layout) {
+  let nextY = drawSummaryRow(page, columns, y, 'SUBTOTAL', totals.subtotal, layout, {
+    quantity: formatQuantity(totals.totalQuantity),
+  });
+  if (totals.discountAmount > 0) {
+    nextY = drawSummaryRow(page, columns, nextY, 'DISCOUNT', -totals.discountAmount, layout);
+  }
+  if (totals.gstAmount > 0 || totals.gstRate > 0) {
+    nextY = drawSummaryRow(page, columns, nextY, `GST ${formatQuantity(totals.gstRate)}%`, totals.gstAmount, layout);
+  }
+  return drawSummaryRow(page, columns, nextY, 'GRAND TOTAL', totals.totalAmount, layout, { bold: true });
+}
+
+function drawContinuationFooter(page, y, layout) {
+  page.drawText('Continued on next page...', {
+    x: 390,
+    y: y - 18,
+    size: 10,
+    font: layout.regularFont,
+    color: rgb(0, 0, 0),
+  });
+}
+
+function drawCommercialTerms(page, quotationData, layout, y) {
+  const terms = [
+    quotationData.payment_terms ? `Payment: ${quotationData.payment_terms}` : null,
+    quotationData.delivery_days !== null && quotationData.delivery_days !== undefined
+      ? `Delivery: ${quotationData.delivery_days} days`
+      : null,
+    quotationData.warranty_terms ? `Warranty: ${quotationData.warranty_terms}` : null,
+    quotationData.valid_until ? `Offer valid until: ${new Date(quotationData.valid_until).toLocaleDateString('en-GB')}` : null,
+  ].filter(Boolean);
+  terms.slice(0, 4).forEach((term, index) => {
+    page.drawText(term.slice(0, 95), {
+      x: 36,
+      y: y - index * 14,
+      size: 9,
+      font: layout.regularFont,
+      color: rgb(0, 0, 0),
+    });
+  });
 }
 
 function drawTableGrid(page, columns, y, height) {

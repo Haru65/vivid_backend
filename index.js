@@ -12,7 +12,7 @@ const settingsRouter = require('./routes/settings');
 const authRouter = require('./routes/auth');
 const profileRouter = require('./routes/profileRoute');
 const { createSchemas } = require('./config/db_schema');
-const { authenticateToken } = require('./middleware/auth');
+const { authenticateToken, validateAuthConfiguration } = require('./middleware/auth');
 
 
 const dotenv = require('dotenv');
@@ -46,6 +46,10 @@ app.use((req, res, next) => {
     'Access-Control-Allow-Methods',
     'GET,POST,PUT,PATCH,DELETE,OPTIONS'
   );
+  res.header('X-Content-Type-Options', 'nosniff');
+  res.header('X-Frame-Options', 'DENY');
+  res.header('Referrer-Policy', 'same-origin');
+  res.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
@@ -55,7 +59,7 @@ app.use((req, res, next) => {
 });
 
 // Middleware to parse JSON requests
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 app.use('/auth', authRouter);
 app.use(authenticateToken);
@@ -72,8 +76,22 @@ app.use('/projects', projectRouter);
 app.use('/settings', settingsRouter);
 app.use('/profile', profileRouter);
 
+app.use((req, res) => {
+  res.status(404).json({ error: 'API endpoint not found.' });
+});
+
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  console.error('Unhandled API error:', error);
+  const status = error.type === 'entity.too.large' ? 413 : error.statusCode || 500;
+  return res.status(status).json({
+    error: status === 413 ? 'Request body is too large.' : status < 500 ? error.message : 'Unexpected server error.',
+  });
+});
+
 async function startServer() {
   try {
+    validateAuthConfiguration();
     await createSchemas();
     const server = app.listen(port, () => {
       console.log(`Server is running on http://localhost:${port}`);

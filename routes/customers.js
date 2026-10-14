@@ -1,6 +1,8 @@
 const express = require('express');
 const {
   retrieveCustomers,
+  searchCustomers,
+  quickCreateCustomer,
   createCustomer,
   updateCustomer,
   deleteCustomer,
@@ -29,6 +31,22 @@ router.get('/', async (req, res) => {
     res.json(await retrieveCustomers(currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to retrieve customers', error);
+  }
+});
+
+router.get('/lookup', async (req, res) => {
+  try {
+    res.json(await searchCustomers(req.query.q));
+  } catch (error) {
+    handleError(res, 'Unable to search customers', error);
+  }
+});
+
+router.post('/quick-create', async (req, res) => {
+  try {
+    res.status(201).json(await quickCreateCustomer(req.body, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to create company', error);
   }
 });
 

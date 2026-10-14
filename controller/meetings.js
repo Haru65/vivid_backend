@@ -11,6 +11,7 @@ const MEETING_COLUMNS = `
   m.all_day,
   m.status,
   m.owner_name,
+  m.owner_user_id,
   m.location,
   m.lead_id,
   m.created_at,
@@ -18,6 +19,7 @@ const MEETING_COLUMNS = `
   l.company_name AS lead_company_name,
   l.contact_person_name AS lead_contact_name,
   l.assigned_to AS lead_owner
+  ,l.sales_owner_id AS lead_owner_user_id
 `;
 
 const STATUSES = new Set(['Scheduled', 'Completed', 'Cancelled']);
@@ -57,6 +59,13 @@ function optionalLeadId(value) {
   return id;
 }
 
+function optionalUserId(value, field = 'Owner') {
+  if (value === undefined || value === null || value === '') return null;
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) throw validationError(`${field} must be a valid user.`);
+  return id;
+}
+
 function meetingValues(data, fallbackOwner) {
   const startAt = timestamp(data.start_at, 'Start time');
   const endAt = timestamp(data.end_at, 'End time');
@@ -76,6 +85,7 @@ function meetingValues(data, fallbackOwner) {
     allDay: Boolean(data.all_day),
     status,
     ownerName: text(data.owner_name || fallbackOwner, 'Owner', 255, true),
+    ownerUserId: optionalUserId(data.owner_user_id),
     location: text(data.location, 'Location', 255),
     leadId: optionalLeadId(data.lead_id),
   };
@@ -84,7 +94,7 @@ function meetingValues(data, fallbackOwner) {
 async function leadForMeeting(leadId) {
   if (!leadId) return null;
   const result = await pool.query(
-    'SELECT id, company_name, assigned_to FROM leads WHERE id = $1',
+    'SELECT id, company_name, assigned_to, sales_owner_id FROM leads WHERE id = $1',
     [leadId],
   );
   if (!result.rows[0]) {
@@ -100,7 +110,34 @@ function isAdmin(user) {
 }
 
 function userCanAccessLead(lead, user) {
-  return isAdmin(user) || !lead || lead.assigned_to === user.name;
+  return isAdmin(user)
+    || !lead
+    || String(lead.sales_owner_id || '') === String(user?.id || '')
+    || (!lead.sales_owner_id && lead.assigned_to === user.name);
+}
+
+function userOwnsMeeting(meeting, user) {
+  return String(meeting?.owner_user_id || '') === String(user?.id || '')
+    || (!meeting?.owner_user_id && meeting?.owner_name === user?.name);
+}
+
+async function resolveMeetingOwner(values, user) {
+  if (!isAdmin(user)) {
+    return { id: user.id, name: user.name };
+  }
+  const ownerUserId = values.ownerUserId || (values.ownerName === user.name ? user.id : null);
+  if (!ownerUserId) throw validationError('Choose an active meeting owner.');
+  const result = await pool.query(
+    `SELECT id, first_name, last_name
+     FROM users
+     WHERE id = $1
+       AND is_active = TRUE
+       AND role IN ('admin', 'sales_head', 'sales_engineer', 'salesperson')`,
+    [ownerUserId],
+  );
+  const owner = result.rows[0];
+  if (!owner) throw validationError('Meeting owner must be an active sales workspace user.');
+  return { id: owner.id, name: [owner.first_name, owner.last_name].filter(Boolean).join(' ') };
 }
 
 async function assertCanManageLead(leadId, user) {
@@ -123,9 +160,13 @@ async function retrieveMeetings(range, user) {
      LEFT JOIN leads l ON l.id = m.lead_id
      WHERE ($1::timestamptz IS NULL OR m.end_at >= $1::timestamptz)
        AND ($2::timestamptz IS NULL OR m.start_at <= $2::timestamptz)
-       AND ($3::boolean = TRUE OR m.owner_name = $4 OR l.assigned_to = $4)
+       AND ($3::boolean = TRUE
+         OR m.owner_user_id = $4
+         OR (m.owner_user_id IS NULL AND m.owner_name = $5)
+         OR l.sales_owner_id = $4
+         OR (l.sales_owner_id IS NULL AND l.assigned_to = $5))
      ORDER BY m.start_at ASC, m.id ASC`,
-    [start, end, admin, user.name],
+    [start, end, admin, user.id, user.name],
   );
   return result.rows;
 }
@@ -133,20 +174,16 @@ async function retrieveMeetings(range, user) {
 async function createMeeting(data, user) {
   const values = meetingValues(data, user.name);
   await assertCanManageLead(values.leadId, user);
-  if (!isAdmin(user) && values.ownerName !== user.name) {
-    const error = new Error('Salespersons can only create meetings for themselves.');
-    error.statusCode = 403;
-    throw error;
-  }
+  const owner = await resolveMeetingOwner(values, user);
 
   const result = await pool.query(
     `INSERT INTO meetings (
       title, description, meeting_type, start_at, end_at, all_day,
-      status, owner_name, location, lead_id
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      status, owner_name, owner_user_id, location, lead_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     RETURNING id`,
     [values.title, values.description, values.meetingType, values.startAt, values.endAt,
-      values.allDay, values.status, values.ownerName, values.location, values.leadId],
+      values.allDay, values.status, owner.name, owner.id, values.location, values.leadId],
   );
 
   const meeting = await retrieveMeeting(result.rows[0].id, user);
@@ -165,8 +202,12 @@ async function retrieveMeeting(id, user) {
      FROM meetings m
      LEFT JOIN leads l ON l.id = m.lead_id
      WHERE m.id = $1
-       AND ($2::boolean = TRUE OR m.owner_name = $3 OR l.assigned_to = $3)`,
-    [id, isAdmin(user), user.name],
+       AND ($2::boolean = TRUE
+         OR m.owner_user_id = $3
+         OR (m.owner_user_id IS NULL AND m.owner_name = $4)
+         OR l.sales_owner_id = $3
+         OR (l.sales_owner_id IS NULL AND l.assigned_to = $4))`,
+    [id, isAdmin(user), user.id, user.name],
   );
   return result.rows[0] || null;
 }
@@ -176,11 +217,12 @@ async function updateMeeting(id, data, user) {
   if (!existing) return null;
   const values = meetingValues(data, existing.owner_name);
   await assertCanManageLead(values.leadId, user);
-  if (!isAdmin(user) && (existing.owner_name !== user.name || values.ownerName !== user.name)) {
+  if (!isAdmin(user) && !userOwnsMeeting(existing, user)) {
     const error = new Error('Salespersons can only update their own meetings.');
     error.statusCode = 403;
     throw error;
   }
+  const owner = await resolveMeetingOwner(values, user);
 
   const result = await pool.query(
     `UPDATE meetings
@@ -192,13 +234,14 @@ async function updateMeeting(id, data, user) {
          all_day = $6,
          status = $7,
          owner_name = $8,
-         location = $9,
-         lead_id = $10,
+         owner_user_id = $9,
+         location = $10,
+         lead_id = $11,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $11
+     WHERE id = $12
      RETURNING id`,
     [values.title, values.description, values.meetingType, values.startAt, values.endAt,
-      values.allDay, values.status, values.ownerName, values.location, values.leadId, id],
+      values.allDay, values.status, owner.name, owner.id, values.location, values.leadId, id],
   );
   const meeting = await retrieveMeeting(result.rows[0].id, user);
   if (meeting?.lead_id) {
@@ -226,7 +269,7 @@ async function updateMeeting(id, data, user) {
 async function deleteMeeting(id, user) {
   const existing = await retrieveMeeting(id, user);
   if (!existing) return null;
-  if (!isAdmin(user) && existing.owner_name !== user.name) {
+  if (!isAdmin(user) && !userOwnsMeeting(existing, user)) {
     const error = new Error('Salespersons can only delete their own meetings.');
     error.statusCode = 403;
     throw error;

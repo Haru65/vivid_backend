@@ -3,6 +3,7 @@ const pool = require('../config/db_connection');
 const { createQuotation, createQuotationRevision, updateQuotation } = require('../controller/quotations');
 const { logLeadActivity } = require('../controller/leads');
 const { createNotification, notifyRole, notifyUserId } = require('./notificationService');
+const { getMasterSettings } = require('../controller/settings');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const HEAD_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
@@ -370,31 +371,27 @@ async function submitForReview(id, user) {
   if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can submit this request.', 403);
   }
+  if (!['in_progress', 'revision_in_progress'].includes(request.status)) {
+    throw appError('Only estimation work in progress can be submitted for review.', 409);
+  }
+  const reviewStatus = request.status === 'revision_in_progress'
+    ? 'revision_submitted_for_review'
+    : 'submitted_for_review';
   await pool.query(
     `UPDATE estimation_requests
-     SET status = 'returned_to_sales',
+     SET status = $2,
          engineer_submitted_at = CURRENT_TIMESTAMP,
-         returned_to_sales_at = CURRENT_TIMESTAMP,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1`,
-    [id],
+    [id, reviewStatus],
   );
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Quotation sent to sales by estimation engineer`,
+    content: `Quotation submitted to Estimation Head for review`,
   }, user);
-  const salesNotification = {
-    title: 'Quotation ready to send',
-    body: `${actorName(user)} sent quotation ${request.quotation_number || ''} back to sales for ${request.company_name || `lead #${request.lead_id}`}.`,
-    category: 'quotation',
-    link_type: 'quotation',
-    link_id: request.quotation_id,
-  };
-  if (request.sales_owner_id) await notifyUserId(request.sales_owner_id, salesNotification);
-  else await createNotification({ name: request.sales_owner_name || request.requested_by_name }, salesNotification);
   const headNotification = {
-    title: 'Quotation sent to sales',
-    body: `${actorName(user)} sent quotation ${request.quotation_number || ''} to sales.`,
+    title: 'Quotation ready for review',
+    body: `${actorName(user)} submitted quotation ${request.quotation_number || ''} for Estimation Head approval.`,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,
@@ -407,6 +404,9 @@ async function submitForReview(id, user) {
 async function requestRevision(id, data, user) {
   requireEstimationHead(user);
   const request = await getRequest(id, user);
+  if (!['submitted_for_review', 'revision_submitted_for_review'].includes(request.status)) {
+    throw appError('Revision can be requested only while the quotation is awaiting Estimation Head review.', 409);
+  }
   const notes = text(data.notes || data.revision_notes, 'Revision notes', 2000, true);
   await pool.query(
     `UPDATE estimation_requests
@@ -435,7 +435,7 @@ async function approveRequest(id, data, user) {
   requireEstimationHead(user);
   const request = await getRequest(id, user);
   if (!request.quotation_id) throw appError('Quotation is required before approval.');
-  if (!['submitted_for_review', 'revision_submitted_for_review', 'in_progress', 'revision_in_progress'].includes(request.status)) {
+  if (!['submitted_for_review', 'revision_submitted_for_review'].includes(request.status)) {
     throw appError('Only submitted estimation quotations can be approved.');
   }
   const notes = text(data.notes || data.review_notes, 'Review notes', 2000);
@@ -559,16 +559,35 @@ async function markClientApproved(id, data, user) {
   const request = await getRequest(id, user);
   if (!['sent_to_client', 'returned_to_sales'].includes(request.status)) throw appError('Quotation must be sent/ready before client approval.');
   const poNumber = text(data.po_number, 'PO number', 100);
-  await pool.query(
-    `UPDATE estimation_requests
-     SET status = 'client_approved', client_decision = 'approved', updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1`, [id],
-  );
-  if (request.quotation_id) {
-    await pool.query(
-      `UPDATE quotations SET customer_po_number = COALESCE($1, customer_po_number), order_confirmed_at = COALESCE(order_confirmed_at, CURRENT_TIMESTAMP) WHERE id = $2`,
-      [poNumber, request.quotation_id],
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE estimation_requests
+       SET status = 'client_approved', client_decision = 'approved', updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`, [id],
     );
+    if (request.quotation_id) {
+      await client.query(
+        `UPDATE quotations
+         SET status = 'Approved',
+             customer_po_number = COALESCE($1, customer_po_number),
+             order_confirmed_at = COALESCE(order_confirmed_at, CURRENT_TIMESTAMP),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [poNumber, request.quotation_id],
+      );
+    }
+    await client.query(
+      `UPDATE leads SET lead_status = 'Proposal Accepted', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [request.lead_id],
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
   }
   await logLeadActivity(request.lead_id, { activity_type: 'system', content: `Client approved quotation${poNumber ? ` with PO ${poNumber}` : ''}` }, user);
   return getRequest(id, user);
@@ -577,13 +596,20 @@ async function markClientApproved(id, data, user) {
 async function discardRequest(id, data, user) {
   requireSales(user);
   const request = await getRequest(id, user);
+  if (!['returned_to_sales', 'sent_to_client', 'client_approved'].includes(request.status)) {
+    throw appError('Only a quotation returned to sales or sent to the client can be discarded.', 409);
+  }
   const reason = text(data.reason, 'Discard reason', 2000, true);
+  const settings = await getMasterSettings();
+  const configuredReasons = Array.isArray(settings.loss_reasons) ? settings.loss_reasons : [];
+  const configuredReason = configuredReasons.find((item) => String(item).trim().toLowerCase() === reason.toLowerCase());
+  if (!configuredReason) throw appError('Select a loss reason configured in Masters.');
   await pool.query(
     `UPDATE estimation_requests SET status = 'discarded', client_decision = 'discarded', discard_reason = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-    [reason, id],
+    [configuredReason, id],
   );
-  await pool.query(`UPDATE leads SET lead_status = 'Lost' WHERE id = $1`, [request.lead_id]);
-  await logLeadActivity(request.lead_id, { activity_type: 'system', content: `Opportunity discarded: ${reason}` }, user);
+  await pool.query(`UPDATE leads SET lead_status = 'Lost', loss_reason = $2 WHERE id = $1`, [request.lead_id, configuredReason]);
+  await logLeadActivity(request.lead_id, { activity_type: 'system', content: `Opportunity discarded: ${configuredReason}` }, user);
   return getRequest(id, user);
 }
 
@@ -621,10 +647,12 @@ async function upsertPoSheet(id, user, salesData = {}) {
     await client.query(
       `UPDATE quotations
        SET customer_po_number = COALESCE($1, customer_po_number),
+           customer_po_date = COALESCE($2::date, customer_po_date),
+           status = 'Approved',
            order_confirmed_at = COALESCE(order_confirmed_at, CURRENT_TIMESTAMP),
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2`,
-      [poNumber, request.quotation_id],
+       WHERE id = $3`,
+      [poNumber, data.po_date || null, request.quotation_id],
     );
     await client.query(
       `UPDATE estimation_requests
@@ -634,6 +662,10 @@ async function upsertPoSheet(id, user, salesData = {}) {
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $2`,
       [sheet.id, id],
+    );
+    await client.query(
+      `UPDATE leads SET lead_status = 'Proposal Accepted', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [request.lead_id],
     );
     await client.query('COMMIT');
   } catch (error) {

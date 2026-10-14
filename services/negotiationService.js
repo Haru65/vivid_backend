@@ -3,6 +3,8 @@ const { logLeadActivity } = require('../controller/leads');
 const { checkNegotiationApprovalRequirement, extractNumber } = require('./negotiationAuthorityService');
 
 const NEGOTIATION_TYPES = new Set(['discount', 'final_price', 'payment_terms', 'delivery_extension', 'warranty', 'other']);
+const NEGOTIATION_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson']);
+const APPROVER_ROLES = new Set(['admin', 'sales_head']);
 
 function appError(message, statusCode = 400) {
   const error = new Error(message);
@@ -166,8 +168,11 @@ async function applyNegotiationToQuotation(client, quotation, negotiation) {
 }
 
 async function quotationForAccess(client, quotationId, user, lock = false) {
+  if (!NEGOTIATION_ROLES.has(user?.role)) {
+    throw appError('Only the sales team can negotiate quotations.', 403);
+  }
   const result = await client.query(
-    `SELECT q.*, l.assigned_to
+    `SELECT q.*, l.assigned_to, l.sales_owner_id
      FROM quotations q
      LEFT JOIN leads l ON l.id = q.lead_id
      WHERE q.id = $1
@@ -176,10 +181,39 @@ async function quotationForAccess(client, quotationId, user, lock = false) {
   );
   const quotation = result.rows[0];
   if (!quotation) throw appError('Quotation not found.', 404);
-  if (['salesperson', 'sales_engineer'].includes(user?.role) && quotation.assigned_to !== user.name) {
+  if (['salesperson', 'sales_engineer'].includes(user?.role)
+      && String(quotation.sales_owner_id || '') !== String(user.id || '')
+      && quotation.assigned_to !== user.name) {
     throw appError('Salespersons can negotiate only their assigned lead quotations.', 403);
   }
   return quotation;
+}
+
+async function selectedApprover(client, approverUserId, requester) {
+  const id = Number(approverUserId);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw appError('Choose a valid higher-up for this GA approval request.');
+  }
+  if (String(id) === String(requester?.id || '')) {
+    throw appError('You cannot send an approval request to yourself.');
+  }
+  const result = await client.query(
+    `SELECT id, first_name, last_name, email, role, department, designation
+     FROM users
+     WHERE id = $1 AND is_active = TRUE`,
+    [id],
+  );
+  const approver = result.rows[0];
+  if (!approver || !APPROVER_ROLES.has(approver.role)) {
+    throw appError('The selected approver is not an active Sales Head or admin.', 400);
+  }
+  return {
+    id: approver.id,
+    name: [approver.first_name, approver.last_name].filter(Boolean).join(' '),
+    email: approver.email,
+    role: approver.role,
+    title: approver.designation || approver.department || approver.role,
+  };
 }
 
 async function getQuotationWithNegotiations(client, quotationId) {
@@ -244,10 +278,6 @@ async function createNegotiation(quotationId, data, user) {
     const clientPitch = normalizeReason(data.client_pitch);
     const reason = normalizeReason(data.reason) || clientPitch;
     const forcedApproval = normalizeBoolean(data.force_approval);
-    const approverName = normalizeText(data.approver_name, 'Approver name');
-    const approverRole = normalizeText(data.approver_role, 'Approver role', 100) || 'admin';
-    const approverTitle = normalizeText(data.approver_title, 'Approver title', 100);
-
     await client.query('BEGIN');
     const quotation = await quotationForAccess(client, quotationId, user, true);
     const oldValue = currentNegotiationValue(quotation, type);
@@ -259,9 +289,12 @@ async function createNegotiation(quotationId, data, user) {
       quotation,
     });
     const approvalRequired = authority.approvalRequired || forcedApproval;
-    if (approvalRequired && !approverName) {
-      throw appError('Choose the higher-up for this GA approval request.');
-    }
+    const approver = approvalRequired
+      ? await selectedApprover(client, data.approver_user_id, user)
+      : null;
+    const approverName = approver?.name || null;
+    const approverRole = approver?.role || null;
+    const approverTitle = approver?.title || null;
     const approvalReason = authority.approvalRequired
       ? authority.reason
       : 'Sales requested higher-up approval for this negotiation.';
@@ -306,6 +339,7 @@ async function createNegotiation(quotationId, data, user) {
       authority_limit: authority.authorityLimit,
       force_approval: forcedApproval,
       approver_name: approverName,
+      approver_user_id: approver?.id || null,
       approver_role: approverRole,
       approver_title: approverTitle,
       client_pitch: clientPitch,
@@ -334,20 +368,24 @@ async function createNegotiation(quotationId, data, user) {
           record_id,
           approval_type,
           requested_by_name,
+          requested_by_user_id,
           requested_by_role,
           approver_name,
+          approver_user_id,
           approver_role,
           status,
           reason,
           metadata
-        ) VALUES ('negotiation', $1, 'ga_negotiation', $2, $3, $4, $5, 'pending', $6, $7)
+        ) VALUES ('negotiation', $1, 'ga_negotiation', $2, $3, $4, $5, $6, $7, 'pending', $8, $9)
         RETURNING *`,
         [
           negotiation.id,
           actorName(user),
+          user?.id || null,
           user?.role || null,
           approverName,
-          approverRole || authority.approverRole,
+          approver.id,
+          approverRole,
           approvalReason,
           JSON.stringify({
             ...metadata,
@@ -359,6 +397,7 @@ async function createNegotiation(quotationId, data, user) {
             current_total: quotation.total_amount,
             comparison_value: authority.comparisonValue,
             authority_message: authority.reason,
+            approver_email: approver.email,
           }),
         ],
       );

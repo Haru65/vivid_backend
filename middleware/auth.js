@@ -4,7 +4,16 @@ const pool = require('../config/db_connection');
 const VALID_ROLES = new Set(['admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp']);
 
 function jwtSecret() {
-  return process.env.JWT_SECRET || 'vivid-dev-secret-change-me';
+  const configured = String(process.env.JWT_SECRET || '').trim();
+  if (configured) return configured;
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+    throw new Error('JWT_SECRET must be configured in production.');
+  }
+  return 'vivid-local-development-secret';
+}
+
+function validateAuthConfiguration() {
+  jwtSecret();
 }
 
 function authError(message = 'Authentication required.') {
@@ -84,4 +93,5 @@ module.exports = {
   optionalUser,
   requireRoles,
   signUserToken,
+  validateAuthConfiguration,
 };

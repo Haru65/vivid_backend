@@ -5,7 +5,8 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const USER_ROLES = new Set(['admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp']);
-const PASSWORD_HASH_PREFIX = process.env.PASSWORD_HASH_PREFIX ;
+const CONFIGURED_PASSWORD_HASH_PREFIX = String(process.env.PASSWORD_HASH_PREFIX || '').trim();
+const PASSWORD_HASH_PREFIX = CONFIGURED_PASSWORD_HASH_PREFIX || 'vivid-pbkdf2-sha512-v1';
 const PASSWORD_ITERATIONS = 120000;
 const PASSWORD_KEY_LENGTH = 64;
 const PASSWORD_DIGEST = 'sha512';
@@ -71,7 +72,7 @@ function userSelect(where = '') {
 
 function hashPassword(password) {
   const value = String(password || '');
-  if (value.length < 6) throw appError('Password must be at least 6 characters.');
+  if (value.length < 8) throw appError('Password must be at least 8 characters.');
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto
     .pbkdf2Sync(value, salt, PASSWORD_ITERATIONS, PASSWORD_KEY_LENGTH, PASSWORD_DIGEST)
@@ -81,7 +82,9 @@ function hashPassword(password) {
 
 function verifyPassword(password, passwordHash) {
   const [prefix, iterations, salt, storedHash] = String(passwordHash || '').split('$');
-  if (prefix !== PASSWORD_HASH_PREFIX || !iterations || !salt || !storedHash) return false;
+  const validPrefix = prefix === PASSWORD_HASH_PREFIX
+    || (!CONFIGURED_PASSWORD_HASH_PREFIX && prefix === 'undefined');
+  if (!validPrefix || !iterations || !salt || !storedHash) return false;
   const hash = crypto
     .pbkdf2Sync(String(password || ''), salt, Number(iterations), PASSWORD_KEY_LENGTH, PASSWORD_DIGEST)
     .toString('hex');
@@ -123,11 +126,15 @@ async function createUserSchema() {
 
   const count = await pool.query('SELECT COUNT(*)::int AS count FROM users');
   if (count.rows[0].count === 0) {
+    const configuredAdminPassword = String(process.env.DEFAULT_ADMIN_PASSWORD || '');
+    if (!configuredAdminPassword && String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+      throw appError('DEFAULT_ADMIN_PASSWORD must be configured before creating the production admin account.', 500);
+    }
     await createUser({
       first_name: process.env.DEFAULT_ADMIN_FIRST_NAME || 'Ashish',
       last_name: process.env.DEFAULT_ADMIN_LAST_NAME || 'Vibhute',
       email: process.env.DEFAULT_ADMIN_EMAIL || 'admin@vividelectromech.in',
-      password: process.env.DEFAULT_ADMIN_PASSWORD || 'admin123',
+      password: configuredAdminPassword || 'admin123',
       role: 'admin',
       department: 'Management',
       designation: 'Workspace Admin',

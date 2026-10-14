@@ -22,6 +22,7 @@ const LEAD_COLUMNS = `
   quotation,
   lead_source,
   lead_status,
+  loss_reason,
   NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
   requirements_summary,
   assigned_to,
@@ -49,6 +50,7 @@ const LEAD_TABLE_COLUMNS = `
   l.quotation,
   l.lead_source,
   l.lead_status,
+  l.loss_reason,
   NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
   l.requirements_summary,
   l.assigned_to,
@@ -324,6 +326,7 @@ function leadUpdateActivities(previous, next) {
     ['industry_type', 'industry type'],
     ['quotation', 'quotation reference'],
     ['lead_source', 'lead source'],
+    ['loss_reason', 'loss reason'],
     ['requirements_summary', 'requirements summary'],
   ];
   const updatedFields = detailFields
@@ -363,7 +366,18 @@ function leadValues(leadData) {
     jsonObject(leadData.raw_data, 'Raw data'),
     enquiryState,
     salesApprovalStatus,
+    status === 'Lost' ? text(leadData.loss_reason, 'Loss reason', 255, true) : null,
   ];
+}
+
+async function ensureLossReasonAllowed(status, lossReason) {
+  if (status !== 'Lost') return;
+  const settings = await getMasterSettings();
+  const reasons = Array.isArray(settings.loss_reasons) ? settings.loss_reasons : [];
+  const selected = String(lossReason || '').trim();
+  if (!reasons.some((reason) => String(reason).trim().toLowerCase() === selected.toLowerCase())) {
+    throw validationError('Select a loss reason configured in Masters.');
+  }
 }
 
 async function ensureLeadSourceAllowed(leadSource, existingLeadSource = null) {
@@ -611,92 +625,63 @@ async function cancelLeadFollowup(leadId, followupId, user) {
   return followup;
 }
 
-async function ensureCustomerForLead(client, lead) {
-  const existingResult = await client.query(
-    `SELECT id, company_name
-     FROM customers
-     WHERE source_lead_id = $1
-        OR LOWER(company_name) = LOWER($2)
-        OR (contact_person_phone IS NOT NULL AND contact_person_phone = $3)
-        OR (raw_data->>'contact_person_email' IS NOT NULL AND LOWER(raw_data->>'contact_person_email') = LOWER($4))
-     ORDER BY CASE
-       WHEN source_lead_id = $1 THEN 0
-       WHEN LOWER(company_name) = LOWER($2) THEN 1
-       WHEN contact_person_phone = $3 THEN 2
-       ELSE 3
-     END, id
-     LIMIT 1`,
-    [lead.id, lead.company_name, lead.contact_person_phone, lead.contact_person_email],
-  );
-
-  if (existingResult.rows[0]) {
-    await client.query(
-      `UPDATE customers
-       SET segment = COALESCE(segment, $2),
-           site_location = COALESCE(site_location, $3),
-           consultant = COALESCE(consultant, $4),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
-      [existingResult.rows[0].id, lead.segment || null, lead.site_location || null, lead.consultant || null],
-    );
-    await client.query(
-      `UPDATE leads SET customer_id = $1 WHERE id = $2`,
-      [existingResult.rows[0].id, lead.id],
-    );
-    return { customer: existingResult.rows[0], created: false };
+async function selectedCustomerForLead(client, customerId) {
+  const id = Number(customerId);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw validationError('Select a company from the customer database.');
   }
-
-  const customerResult = await client.query(
-    `INSERT INTO customers (
-      company_name,
-      industry,
-      segment,
-      site_location,
-      consultant,
-      contact_person_name,
-      contact_person_phone,
-      amc_status,
-      customer_since,
-      source_lead_id,
-      raw_data
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'None', CURRENT_DATE, $8, $9)
-    RETURNING id, company_name`,
-    [
-      lead.company_name,
-      lead.industry_type || null,
-      lead.segment || null,
-      lead.site_location || null,
-      lead.consultant || null,
-      lead.contact_person_name || null,
-      lead.contact_person_phone || null,
-      lead.id,
-      { contact_person_email: lead.contact_person_email },
-    ],
+  const result = await client.query(
+    `SELECT
+       id,
+       company_name,
+       industry,
+       segment,
+       site_location,
+       consultant,
+       contact_person_name,
+       contact_person_phone,
+       COALESCE(contact_person_email, raw_data->>'contact_person_email') AS contact_person_email
+     FROM customers
+     WHERE id = $1
+     FOR SHARE`,
+    [id],
   );
+  if (!result.rows[0]) throw validationError('The selected company is no longer available.');
+  return result.rows[0];
+}
 
-  await client.query(
-    `UPDATE leads SET customer_id = $1 WHERE id = $2`,
-    [customerResult.rows[0].id, lead.id],
-  );
-
-  return { customer: customerResult.rows[0], created: true };
+function leadDataForCustomer(leadData, customer) {
+  return {
+    ...leadData,
+    customer_id: customer.id,
+    company_name: customer.company_name,
+    contact_person_name: leadData.contact_person_name || customer.contact_person_name,
+    contact_person_email: leadData.contact_person_email || customer.contact_person_email,
+    contact_person_phone: leadData.contact_person_phone || customer.contact_person_phone,
+    industry_type: leadData.industry_type || customer.industry,
+    segment: leadData.segment || customer.segment,
+    site_location: leadData.site_location || customer.site_location,
+    consultant: leadData.consultant || customer.consultant,
+  };
 }
 
 async function createLead(leadData, user) {
   const client = await pool.connect();
   let lead;
-  let customerState;
+  let customer;
   let owner;
   try {
     await client.query('BEGIN');
+    customer = await selectedCustomerForLead(client, leadData.customer_id);
     owner = await resolveSalesOwner(leadData, user, client);
-    const ownedLeadData = { ...leadData, assigned_to: owner.name };
+    const ownedLeadData = leadDataForCustomer({ ...leadData, assigned_to: owner.name }, customer);
     await ensureLeadSourceAllowed(ownedLeadData.lead_source);
+    await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
     const values = leadValues(ownedLeadData);
     if (QUOTATION_REQUIRED_STATUSES.has(values[14])) {
       throw validationError(`Create the lead and send a quotation before moving it to ${values[14]}.`);
     }
-    const insertValues = [...values.slice(0, 17), owner.id, owner.id, ...values.slice(17)];
+    const insertValues = [...values.slice(0, 6), customer.id, ...values.slice(6, 17), owner.id, owner.id, ...values.slice(17)];
     const result = await client.query(
       `INSERT INTO leads (
         company_name,
@@ -705,6 +690,7 @@ async function createLead(leadData, user) {
         contact_person_phone,
         enquiry_date,
         priority,
+        customer_id,
         segment,
         site_location,
         consultant,
@@ -720,13 +706,20 @@ async function createLead(leadData, user) {
         current_assignee_id,
         raw_data,
         enquiry_state,
-        sales_approval_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+        sales_approval_status,
+        loss_reason
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
       RETURNING ${LEAD_COLUMNS}`,
       insertValues,
     );
     lead = result.rows[0];
-    customerState = await ensureCustomerForLead(client, lead);
+    await client.query(
+      `UPDATE customers
+       SET source_lead_id = COALESCE(source_lead_id, $2),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [customer.id, lead.id],
+    );
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -741,9 +734,7 @@ async function createLead(leadData, user) {
   }, user);
   await logLeadActivity(lead.id, {
     activity_type: 'system',
-    content: customerState.created
-      ? `Customer account created for ${customerState.customer.company_name}`
-      : `Customer account linked to existing ${customerState.customer.company_name}`,
+    content: `Customer account linked to ${customer.company_name}`,
   }, user);
   if (String(owner.id) !== String(user?.id || '')) {
     await notifyUserId(owner.id, {
@@ -779,15 +770,17 @@ async function updateLead(id, leadData, user) {
     }
     if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
 
+    const customer = await selectedCustomerForLead(client, leadData.customer_id || previous.customer_id);
     owner = await resolveSalesOwner(leadData, user, client);
-    const ownedLeadData = { ...leadData, assigned_to: owner.name };
+    const ownedLeadData = leadDataForCustomer({ ...leadData, assigned_to: owner.name }, customer);
     await ensureLeadSourceAllowed(ownedLeadData.lead_source, previous.lead_source);
+    await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
     const values = leadValues(ownedLeadData);
     await ensureLeadStatusAllowed({
       ...previous,
       quotation: values[12] || previous.quotation,
     }, values[14]);
-    const updateValues = [...values.slice(0, 17), owner.id, owner.id, ...values.slice(17), id];
+    const updateValues = [...values.slice(0, 6), customer.id, ...values.slice(6, 17), owner.id, owner.id, ...values.slice(17), id];
 
     const result = await client.query(
       `UPDATE leads
@@ -797,24 +790,26 @@ async function updateLead(id, leadData, user) {
          contact_person_phone = $4,
          enquiry_date = $5,
          priority = $6,
-         segment = $7,
-         site_location = $8,
-         consultant = $9,
-         enquiry_product = $10,
-         enquiry_notes = $11,
-         industry_type = $12,
-         quotation = $13,
-         lead_source = $14,
-         lead_status = $15,
-         requirements_summary = $16,
-         assigned_to = $17,
-         sales_owner_id = $18,
-         current_assignee_id = $19,
-         raw_data = $20,
-         enquiry_state = $21,
-         sales_approval_status = $22,
+         customer_id = $7,
+         segment = $8,
+         site_location = $9,
+         consultant = $10,
+         enquiry_product = $11,
+         enquiry_notes = $12,
+         industry_type = $13,
+         quotation = $14,
+         lead_source = $15,
+         lead_status = $16,
+         requirements_summary = $17,
+         assigned_to = $18,
+         sales_owner_id = $19,
+         current_assignee_id = $20,
+         raw_data = $21,
+         enquiry_state = $22,
+         sales_approval_status = $23,
+         loss_reason = $24,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $23
+     WHERE id = $25
      RETURNING ${LEAD_COLUMNS}`,
       updateValues,
     );
@@ -861,12 +856,47 @@ async function updateLead(id, leadData, user) {
 
 async function deleteLead(id, user) {
   await leadForAccess(id, user);
-  const result = await pool.query(
-    `DELETE FROM leads WHERE id = $1 RETURNING id`,
-    [id],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const dependencies = await client.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM quotations WHERE lead_id = $1) AS has_quotations,
+         EXISTS (SELECT 1 FROM estimation_requests WHERE lead_id = $1) AS has_estimation,
+         EXISTS (SELECT 1 FROM meetings WHERE lead_id = $1) AS has_meetings,
+         EXISTS (SELECT 1 FROM crm_erp_handovers WHERE lead_id = $1) AS has_handovers,
+         EXISTS (SELECT 1 FROM projects WHERE lead_id = $1) AS has_projects`,
+      [id],
+    );
+    const linked = dependencies.rows[0];
+    if (Object.values(linked).some(Boolean)) {
+      throw Object.assign(new Error('This lead has quotation, estimation, meeting, or ERP history and cannot be deleted.'), { statusCode: 409 });
+    }
 
-  return result.rows[0] || null;
+    await client.query(
+      `UPDATE customers c
+       SET source_lead_id = (
+         SELECT l.id
+         FROM leads l
+         WHERE l.customer_id = c.id AND l.id <> $1
+         ORDER BY l.created_at ASC, l.id ASC
+         LIMIT 1
+       ),
+       updated_at = CURRENT_TIMESTAMP
+       WHERE c.source_lead_id = $1`,
+      [id],
+    );
+    await client.query('DELETE FROM lead_followups WHERE lead_id = $1', [id]);
+    await client.query('DELETE FROM lead_activities WHERE lead_id = $1', [id]);
+    const result = await client.query('DELETE FROM leads WHERE id = $1 RETURNING id', [id]);
+    await client.query('COMMIT');
+    return result.rows[0] || null;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function acceptProposal(id, quotation, user) {

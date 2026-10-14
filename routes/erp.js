@@ -17,9 +17,12 @@ const {
   completeProjectWorkflowStage,
   updateProjectWorkflowStage,
 } = require('../services/projectWorkflowService');
-const { optionalUser } = require('../middleware/auth');
+const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
+const salesHandoverAccess = requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'erp');
+const salesHandoverWrite = requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson');
+const erpAccess = requireRoles('admin', 'erp');
 
 function currentUser(req) {
   return optionalUser(req);
@@ -34,7 +37,7 @@ function handleError(res, message, error) {
   });
 }
 
-router.get('/handovers', async (req, res) => {
+router.get('/handovers', salesHandoverAccess, async (req, res) => {
   try {
     res.json(await listHandovers(currentUser(req)));
   } catch (error) {
@@ -42,7 +45,7 @@ router.get('/handovers', async (req, res) => {
   }
 });
 
-router.get('/handovers/:id', async (req, res) => {
+router.get('/handovers/:id', salesHandoverAccess, async (req, res) => {
   try {
     res.json(await getHandover(req.params.id, currentUser(req)));
   } catch (error) {
@@ -50,7 +53,7 @@ router.get('/handovers/:id', async (req, res) => {
   }
 });
 
-router.post('/handovers', async (req, res) => {
+router.post('/handovers', salesHandoverWrite, async (req, res) => {
   try {
     res.status(201).json(await createHandover(req.body, currentUser(req)));
   } catch (error) {
@@ -58,7 +61,7 @@ router.post('/handovers', async (req, res) => {
   }
 });
 
-router.put('/handovers/:id', async (req, res) => {
+router.put('/handovers/:id', salesHandoverWrite, async (req, res) => {
   try {
     res.json(await updateHandover(req.params.id, req.body, currentUser(req)));
   } catch (error) {
@@ -66,7 +69,7 @@ router.put('/handovers/:id', async (req, res) => {
   }
 });
 
-router.post('/handovers/:id/submit', async (req, res) => {
+router.post('/handovers/:id/submit', salesHandoverWrite, async (req, res) => {
   try {
     res.json(await submitHandover(req.params.id, currentUser(req)));
   } catch (error) {
@@ -74,7 +77,7 @@ router.post('/handovers/:id/submit', async (req, res) => {
   }
 });
 
-router.post('/handovers/:id/accept', async (req, res) => {
+router.post('/handovers/:id/accept', erpAccess, async (req, res) => {
   try {
     res.json(await acceptHandover(req.params.id, req.body, currentUser(req)));
   } catch (error) {
@@ -82,7 +85,7 @@ router.post('/handovers/:id/accept', async (req, res) => {
   }
 });
 
-router.post('/handovers/:id/reject', async (req, res) => {
+router.post('/handovers/:id/reject', erpAccess, async (req, res) => {
   try {
     res.json(await rejectHandover(req.params.id, req.body, currentUser(req)));
   } catch (error) {
@@ -90,7 +93,7 @@ router.post('/handovers/:id/reject', async (req, res) => {
   }
 });
 
-router.get('/projects', async (req, res) => {
+router.get('/projects', erpAccess, async (req, res) => {
   try {
     res.json(await listProjects(currentUser(req)));
   } catch (error) {
@@ -98,7 +101,7 @@ router.get('/projects', async (req, res) => {
   }
 });
 
-router.get('/projects/:id/workflow', async (req, res) => {
+router.get('/projects/:id/workflow', erpAccess, async (req, res) => {
   try {
     res.json(await getWorkflowForProject(req.params.id, currentUser(req)));
   } catch (error) {
@@ -106,7 +109,7 @@ router.get('/projects/:id/workflow', async (req, res) => {
   }
 });
 
-router.put('/projects/:id/workflow/:stageId', async (req, res) => {
+router.put('/projects/:id/workflow/:stageId', erpAccess, async (req, res) => {
   try {
     res.json(await updateProjectWorkflowStage(req.params.id, req.params.stageId, req.body, currentUser(req)));
   } catch (error) {
@@ -114,7 +117,7 @@ router.put('/projects/:id/workflow/:stageId', async (req, res) => {
   }
 });
 
-router.post('/projects/:id/workflow/:stageId/complete', async (req, res) => {
+router.post('/projects/:id/workflow/:stageId/complete', erpAccess, async (req, res) => {
   try {
     res.json(await completeProjectWorkflowStage(req.params.id, req.params.stageId, currentUser(req)));
   } catch (error) {
@@ -122,7 +125,7 @@ router.post('/projects/:id/workflow/:stageId/complete', async (req, res) => {
   }
 });
 
-router.get('/projects/:id', async (req, res) => {
+router.get('/projects/:id', erpAccess, async (req, res) => {
   try {
     res.json(await getProject(req.params.id, currentUser(req)));
   } catch (error) {
