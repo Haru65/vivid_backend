@@ -172,7 +172,7 @@ async function quotationForAccess(client, quotationId, user, lock = false) {
     throw appError('Only the sales team can negotiate quotations.', 403);
   }
   const result = await client.query(
-    `SELECT q.*, l.assigned_to, l.sales_owner_id
+    `SELECT q.*, l.assigned_to, NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id
      FROM quotations q
      LEFT JOIN leads l ON l.id = q.lead_id
      WHERE q.id = $1

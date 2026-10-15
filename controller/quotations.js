@@ -204,6 +204,12 @@ function nonNegativeNumber(value, field, defaultValue = 0) {
   return number;
 }
 
+function nonNegativeInteger(value, field) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) throw validationError(`${field} must be a whole number of zero or more.`);
+  return number;
+}
+
 function normalizeDate(value, field) {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -225,17 +231,49 @@ function normalizeLineItems(items) {
       quantity,
       unit_price: unitPrice,
       amount: Number((quantity * unitPrice).toFixed(2)),
+      price_point_code: nullableString(item?.price_point_code, `Line item ${index + 1} price point code`, 50),
+      unit: nullableString(item?.unit, `Line item ${index + 1} unit`, 30) || 'No.',
+      master_rate: nonNegativeNumber(item?.master_rate, `Line item ${index + 1} master rate`, unitPrice),
     };
   });
+}
+
+function normalizeTechnicalNotes(items) {
+  if (items === undefined || items === null) return [];
+  if (!Array.isArray(items)) throw validationError('Technical notes must be a list.');
+  const seen = new Set();
+  return items.slice(0, 200).map((item, index) => {
+    const code = requiredString(item?.code, `Technical note ${index + 1} code`, 50).toUpperCase();
+    if (seen.has(code)) throw validationError(`Technical note ${code} is duplicated.`);
+    seen.add(code);
+    return {
+      code,
+      section: nullableString(item?.section, `Technical note ${index + 1} section`, 100) || 'General',
+      label: requiredString(item?.label, `Technical note ${index + 1} label`, 200),
+      pdf_label: nullableString(item?.pdf_label, `Technical note ${index + 1} PDF label`, 200)
+        || requiredString(item?.label, `Technical note ${index + 1} label`, 200),
+      value: nullableString(item?.value, `Technical note ${index + 1} value`, 1000) || '',
+      required: item?.required !== false,
+      display_order: Number.isInteger(Number(item?.display_order)) ? Number(item.display_order) : (index + 1) * 10,
+    };
+  }).sort((left, right) => left.display_order - right.display_order);
 }
 
 function normalizedValues(data) {
   const lineItems = normalizeLineItems(data.line_items);
   const subtotal = Number(lineItems.reduce((sum, item) => sum + item.amount, 0).toFixed(2));
+  const discountPercent = nonNegativeNumber(data.discount_percent, 'Discount rate', 0);
+  if (discountPercent > 100) throw validationError('Discount rate cannot exceed 100%.');
+  const discountAmount = Number((subtotal * discountPercent / 100).toFixed(2));
+  const taxableAmount = Math.max(0, subtotal - discountAmount);
   const gstRate = nonNegativeNumber(data.gst_rate, 'GST rate', 18);
   if (gstRate > 100) throw validationError('GST rate cannot exceed 100%.');
-  const gstAmount = Number((subtotal * gstRate / 100).toFixed(2));
-  const totalAmount = Number((subtotal + gstAmount).toFixed(2));
+  const gstAmount = Number((taxableAmount * gstRate / 100).toFixed(2));
+  const calculatedTotal = Number((taxableAmount + gstAmount).toFixed(2));
+  const finalPrice = data.final_price === undefined || data.final_price === null || data.final_price === ''
+    ? null
+    : nonNegativeNumber(data.final_price, 'Final price');
+  const totalAmount = finalPrice === null ? calculatedTotal : finalPrice;
 
   return {
     leadId: positiveInteger(data.lead_id, 'Lead'),
@@ -256,8 +294,17 @@ function normalizedValues(data) {
     gstRate,
     gstAmount,
     totalAmount,
+    discountPercent,
+    discountAmount,
+    finalPrice,
+    paymentTerms: nullableString(data.payment_terms, 'Payment terms', 5000),
+    deliveryDays: data.delivery_days === undefined || data.delivery_days === null || data.delivery_days === ''
+      ? null
+      : nonNegativeInteger(data.delivery_days, 'Delivery days'),
+    warrantyTerms: nullableString(data.warranty_terms, 'Warranty terms', 5000),
     validUntil: normalizeDate(data.valid_until, 'Valid until'),
     notes: nullableString(data.notes, 'Notes', 5000),
+    technicalNotesData: normalizeTechnicalNotes(data.technical_notes_data),
   };
 }
 
@@ -332,8 +379,10 @@ async function createQuotation(data, user) {
       quotation_number, lead_id, company_name, contact_person_name, contact_person_email,
       contact_person_phone, billing_name, billing_address, billing_city, billing_state,
       billing_pincode, billing_gstin, billing_email, billing_phone, line_items, subtotal,
-      gst_rate, gst_amount, total_amount, valid_until, notes, prepared_by_user_id
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+      gst_rate, gst_amount, total_amount, discount_percent, discount_amount, final_price,
+      payment_terms, delivery_days, warranty_terms, valid_until, notes, technical_notes_data,
+      prepared_by_user_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
     RETURNING id`,
     [
       quotationNumber,
@@ -355,8 +404,15 @@ async function createQuotation(data, user) {
       values.gstRate,
       values.gstAmount,
       values.totalAmount,
+      values.discountPercent,
+      values.discountAmount,
+      values.finalPrice,
+      values.paymentTerms,
+      values.deliveryDays,
+      values.warrantyTerms,
       values.validUntil,
       values.notes,
+      JSON.stringify(values.technicalNotesData),
       user?.id || null,
     ],
   );
@@ -391,11 +447,18 @@ async function updateQuotation(id, data, user) {
            gst_rate = $15,
            gst_amount = $16,
            total_amount = $17,
-           valid_until = $18,
-           notes = $19,
-           prepared_by_user_id = COALESCE(prepared_by_user_id, $20),
+           discount_percent = $18,
+           discount_amount = $19,
+           final_price = $20,
+           payment_terms = $21,
+           delivery_days = $22,
+           warranty_terms = $23,
+           valid_until = $24,
+           notes = $25,
+           technical_notes_data = $26,
+           prepared_by_user_id = COALESCE(prepared_by_user_id, $27),
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $21
+       WHERE id = $28
        RETURNING id`,
       [
         lead.company_name,
@@ -415,8 +478,15 @@ async function updateQuotation(id, data, user) {
         values.gstRate,
         values.gstAmount,
         values.totalAmount,
+        values.discountPercent,
+        values.discountAmount,
+        values.finalPrice,
+        values.paymentTerms,
+        values.deliveryDays,
+        values.warrantyTerms,
         values.validUntil,
         values.notes,
+        JSON.stringify(values.technicalNotesData),
         user?.id || null,
         id,
       ],
@@ -476,7 +546,7 @@ async function createQuotationRevision(id, data, user) {
         revision_group_id, revision_number, parent_quotation_id, is_current_revision,
         revision_reason, negotiation_notes, estimation_request_id, boq_data, costing_data,
         total_internal_cost, selling_price, margin_percent, revision_type, customer_request,
-        sales_notes, prepared_by_user_id
+        sales_notes, technical_notes_data, prepared_by_user_id
       )
       SELECT $1, lead_id, company_name, contact_person_name, contact_person_email,
         contact_person_phone, billing_name, billing_address, billing_city, billing_state,
@@ -485,7 +555,7 @@ async function createQuotationRevision(id, data, user) {
         payment_terms, delivery_days, warranty_terms, valid_until, 'Draft', notes,
         $2, $3, id, TRUE, $4, $5, estimation_request_id, boq_data, costing_data,
         total_internal_cost, selling_price, margin_percent, 'customer_revision', $4,
-        sales_notes, $6
+        sales_notes, technical_notes_data, $6
       FROM quotations
       WHERE id = $7
       RETURNING id`,
@@ -550,7 +620,7 @@ async function sendQuotation(id, user) {
     const quotation = await quotationForAccess(client, id, user, { lock: true, permission: 'send' });
     if (quotation.status !== 'Draft') throw appError('Only draft quotations can be sent.', 409);
     if (quotation.estimation_request_id && quotation.estimation_status !== 'returned_to_sales') {
-      throw appError('Estimation Head must approve and return this quotation to sales before it can be sent.', 409);
+      throw appError('Estimation must complete and return this quotation to sales before it can be sent.', 409);
     }
     const recipient = quotation.contact_person_email || quotation.billing_email;
     if (!recipient) throw appError('Add a customer email address before sending this quotation.');

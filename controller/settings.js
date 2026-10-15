@@ -17,6 +17,15 @@ const DEFAULT_MASTER_SETTINGS = {
   erp_workflow_stage_owners: ['GA Approval - Design', 'Cost Approval - Estimation', 'Work Order Approval - Management', 'Purchase - Purchase', 'Production - Production', 'Quality & Testing - QA/QC', 'Dispatch & Delivery - Dispatch'],
   loss_reasons: ['Price high', 'Competitor selected', 'Project delayed', 'No response', 'Technical mismatch', 'Budget not approved'],
   email_templates: ['Quotation email', 'Approval request email', 'Follow-up email', 'Handover notification'],
+  quotation_price_points: [],
+  technical_note_fields: [
+    { code: 'IP_RATING', section: 'General', label: 'Degree of protection', pdf_label: 'IP Rating / Degree of Protection', input_type: 'select', options: ['IP42', 'IP52', 'IP54', 'IP55', 'IP65'], default_value: 'IP54', required: true, active: true, display_order: 10 },
+    { code: 'INSTALLATION', section: 'General', label: 'Installation', pdf_label: 'Installation', input_type: 'select', options: ['Indoor', 'Outdoor'], default_value: 'Indoor', required: true, active: true, display_order: 20 },
+    { code: 'PAINT', section: 'Construction', label: 'Paint shade', pdf_label: 'Paint Shade', input_type: 'text', options: [], default_value: 'RAL7032', required: true, active: true, display_order: 30 },
+    { code: 'BUSBAR', section: 'Busbar', label: 'Busbar specification', pdf_label: 'Busbar', input_type: 'text', options: [], default_value: '', required: true, active: true, display_order: 40 },
+    { code: 'METER', section: 'Metering and protection', label: 'Meter specification', pdf_label: 'Meter', input_type: 'text', options: [], default_value: '', required: true, active: true, display_order: 50 },
+    { code: 'RELAY', section: 'Metering and protection', label: 'Relay specification', pdf_label: 'Relay', input_type: 'text', options: [], default_value: '', required: true, active: true, display_order: 60 },
+  ],
 };
 
 function appError(message, statusCode = 400) {
@@ -56,11 +65,63 @@ function normalizeMasterList(value, fallback = []) {
   return unique;
 }
 
+function cleanText(value, maxLength = 200) {
+  return String(value || '').trim().slice(0, maxLength);
+}
+
+function normalizePricePoints(value, fallback = []) {
+  if (!Array.isArray(value)) return fallback;
+  const seen = new Set();
+  return value.slice(0, 500).map((item, index) => {
+    if (!item || typeof item !== 'object') return null;
+    const code = cleanText(item.code, 50).toUpperCase();
+    const description = cleanText(item.description, 500);
+    if (!code || !description || seen.has(code)) return null;
+    seen.add(code);
+    const rate = Number(item.default_rate || 0);
+    return {
+      code,
+      description,
+      category: cleanText(item.category, 100),
+      unit: cleanText(item.unit, 30) || 'No.',
+      default_rate: Number.isFinite(rate) && rate >= 0 ? Number(rate.toFixed(2)) : 0,
+      active: item.active !== false,
+      display_order: Number.isInteger(Number(item.display_order)) ? Number(item.display_order) : (index + 1) * 10,
+    };
+  }).filter(Boolean).sort((left, right) => left.display_order - right.display_order);
+}
+
+function normalizeTechnicalNoteFields(value, fallback = []) {
+  if (!Array.isArray(value)) return fallback;
+  const seen = new Set();
+  return value.slice(0, 200).map((item, index) => {
+    if (!item || typeof item !== 'object') return null;
+    const code = cleanText(item.code, 50).toUpperCase();
+    const label = cleanText(item.label, 200);
+    if (!code || !label || seen.has(code)) return null;
+    seen.add(code);
+    const inputType = ['select', 'text', 'number'].includes(item.input_type) ? item.input_type : 'text';
+    return {
+      code,
+      section: cleanText(item.section, 100) || 'General',
+      label,
+      pdf_label: cleanText(item.pdf_label, 200) || label,
+      input_type: inputType,
+      options: inputType === 'select' ? normalizeMasterList(item.options, []) : [],
+      default_value: cleanText(item.default_value, 500),
+      required: item.required !== false,
+      active: item.active !== false,
+      display_order: Number.isInteger(Number(item.display_order)) ? Number(item.display_order) : (index + 1) * 10,
+    };
+  }).filter(Boolean).sort((left, right) => left.display_order - right.display_order);
+}
+
 function normalizeMasterSettings(data = {}) {
-  return Object.fromEntries(Object.entries(DEFAULT_MASTER_SETTINGS).map(([key, fallback]) => [
-    key,
-    normalizeMasterList(data[key], fallback),
-  ]));
+  return Object.fromEntries(Object.entries(DEFAULT_MASTER_SETTINGS).map(([key, fallback]) => {
+    if (key === 'quotation_price_points') return [key, normalizePricePoints(data[key], fallback)];
+    if (key === 'technical_note_fields') return [key, normalizeTechnicalNoteFields(data[key], fallback)];
+    return [key, normalizeMasterList(data[key], fallback)];
+  }));
 }
 
 async function getTaxSettings() {

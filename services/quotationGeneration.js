@@ -39,6 +39,14 @@ async function generateQuotationPdf(data = {}, user, options = {}) {
     StandardFonts.HelveticaBold
   );
 
+  const italicFont = await pdfDoc.embedFont(
+    StandardFonts.HelveticaOblique
+  );
+
+  const boldItalicFont = await pdfDoc.embedFont(
+    StandardFonts.HelveticaBoldOblique
+  );
+
   // ----------------------------------------------------
   // 3. QUOTATION DATA
   // ----------------------------------------------------
@@ -182,6 +190,13 @@ async function generateQuotationPdf(data = {}, user, options = {}) {
     font: regularFont,
   });
 
+  page.drawText("Annexure # III Commercial Terms & Conditions.", {
+    x: 48,
+    y: 320,
+    size: 12,
+    font: regularFont,
+  });
+
   
 
   // Closing
@@ -221,6 +236,26 @@ async function generateQuotationPdf(data = {}, user, options = {}) {
     pageHeight,
     regularFont,
     boldFont,
+    italicFont,
+    boldItalicFont,
+  });
+
+  drawTechnicalNotesPages(pdfDoc, templateImage, quotationData, quotation, {
+    pageWidth,
+    pageHeight,
+    regularFont,
+    boldFont,
+    italicFont,
+    boldItalicFont,
+  });
+
+  drawCommercialTermsAnnexurePages(pdfDoc, quotationData, quotation, {
+    pageWidth,
+    pageHeight,
+    regularFont,
+    boldFont,
+    italicFont,
+    boldItalicFont,
   });
 
   // ----------------------------------------------------
@@ -238,6 +273,151 @@ async function generateQuotationPdf(data = {}, user, options = {}) {
   return pdfBytes;
 }
 
+function drawTechnicalNotesPages(pdfDoc, templateImage, quotationData, quotation, layout) {
+  const rows = buildTechnicalReferenceRows(quotationData.technical_notes_data);
+  const columns = [
+    { label: 'Sr.No.', x: 30, width: 40 },
+    { label: 'RFQ DOCUMENT', x: 70, width: 105 },
+    { label: 'Specification/SLD/BOM requirement', x: 175, width: 190 },
+    { label: "Consideration For M'SET Design", x: 365, width: 200 },
+  ];
+  let page = createTechnicalNotesPage(pdfDoc, templateImage, quotationData, quotation, layout, columns, false);
+  let cursorY = 602;
+
+  rows.forEach((row) => {
+    const rfqLines = wrapText(row.rfqDocument, layout.regularFont, 9, columns[1].width - 10);
+    const requirementLines = wrapText(row.requirement, layout.regularFont, 9, columns[2].width - 10);
+    const considerationLines = wrapText(row.consideration, layout.regularFont, 9, columns[3].width - 10);
+    const rowHeight = Math.max(34, 14 + Math.max(rfqLines.length, requirementLines.length, considerationLines.length) * 11);
+    if (cursorY - rowHeight < 175) {
+      page = createTechnicalNotesPage(pdfDoc, templateImage, quotationData, quotation, layout, columns, true);
+      cursorY = 602;
+    }
+    drawTableGrid(page, columns, cursorY, rowHeight);
+    drawCellText(page, String(row.sr), columns[0].x, cursorY - rowHeight / 2 - 4, columns[0].width, 9, layout.regularFont, 'center');
+    drawMultilineCell(page, rfqLines, columns[1].x, cursorY - 17, columns[1].width, 9, layout.regularFont, 'center');
+    drawMultilineCell(page, requirementLines, columns[2].x, cursorY - 17, columns[2].width, 9, layout.regularFont, 'center');
+    drawMultilineCell(page, considerationLines, columns[3].x, cursorY - 17, columns[3].width, 9, layout.regularFont, 'left');
+    cursorY -= rowHeight;
+  });
+}
+
+function createTechnicalNotesPage(pdfDoc, templateImage, quotationData, quotation, layout, columns, continued) {
+  const page = pdfDoc.addPage([layout.pageWidth, layout.pageHeight]);
+  page.drawImage(templateImage, { x: 0, y: 0, width: layout.pageWidth, height: layout.pageHeight });
+  const title = buildPriceScheduleTitle(quotationData, quotation);
+  drawCenteredText(page, title, 660, fitTextSize(title, layout.boldFont, 13, 10, 500), layout.boldFont, layout.pageWidth);
+  drawCenteredText(page, continued ? 'Annexure-II (Continued)' : 'Annexure-II', 640, 13, layout.boldFont, layout.pageWidth);
+  const headerY = 632;
+  drawTableGrid(page, columns, headerY, 30);
+  columns.forEach((column) => drawMultilineCell(page, wrapText(column.label, layout.boldFont, 7.5, column.width - 6), column.x, headerY - 11, column.width, 7.5, layout.boldFont, 'center'));
+  return page;
+}
+
+function normalizeTechnicalNotes(items) {
+  if (typeof items === 'string') {
+    try {
+      return normalizeTechnicalNotes(JSON.parse(items));
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(items)) return [];
+  return items.map((item, index) => ({
+    code: String(item.code || ''),
+    section: String(item.section || 'General'),
+    label: String(item.pdf_label || item.label || item.code || `Technical note ${index + 1}`),
+    value: String(item.value || ''),
+    display_order: Number(item.display_order || (index + 1) * 10),
+  })).sort((left, right) => left.display_order - right.display_order);
+}
+
+function buildTechnicalReferenceRows(items) {
+  const values = new Map(normalizeTechnicalNotes(items).map((item) => [String(item.code || '').toUpperCase(), item.value]));
+  const value = (code, fallback = 'Not specified') => String(values.get(code) || fallback);
+  const installation = value('INSTALLATION');
+  const ipRating = value('IP_RATING');
+  const paint = value('PAINT');
+  const busbar = value('BUSBAR');
+  const meter = value('METER');
+  const relay = value('RELAY');
+  return [
+    { sr: 1, rfqDocument: 'BOQ', requirement: 'Degree of Protection', consideration: `We have considered panel ${installation} type with ${ipRating}.` },
+    { sr: 2, rfqDocument: 'Consideration', requirement: 'Paint Shade.', consideration: `The Panel will be powder coated with ${paint}.` },
+    { sr: 3, rfqDocument: 'BOQ', requirement: 'Busbar', consideration: `Bus bar will be ${busbar}.` },
+    { sr: 4, rfqDocument: 'BOQ', requirement: 'Meter', consideration: `We have considered ${meter} as per BOQ.` },
+    { sr: 5, rfqDocument: 'BOQ', requirement: 'Relay', consideration: `We have considered ${relay} as per BOQ.` },
+  ];
+}
+
+function drawCommercialTermsAnnexurePages(pdfDoc, quotationData, quotation, layout) {
+  const firstPageTerms = [
+    ['Price', 'As per Price Schedule (Annexure #1), price are ex-works. Price not valid for partial order and/or reduction in quantity.'],
+    ['Scope', 'Our scope is limited to supply only. Unloading, Installation, Shifting, Commissioning etc. are not included in our scope.'],
+    ['Payment', '10% advance along with PO\n30% after drawing approval\n60% after successfully Inspection at our works before dispatch.'],
+    ['Jurisdiction', 'The Laws of Indian Union in Force shall govern this order. Only the Competent courts in Navi Mumbai shall have the jurisdiction.'],
+    ['GST & HSN Code', 'LT Panel  -  HSN 85371000\nHT Panel  -  HSN 85372000\nRMU       -  HSN 85372000\nBus Duct  -  HSN 85371000\n18% Extra or as applicable at the time of dispatch'],
+    ['Performance Bank Guarantee (PBG)', 'On special request we will provide PBG at extra cost for the duration of the defect liability period. The duration of the PBG will include statutory claim period of 1 year as per RBI guidelines.'],
+    ['Tax Collected at Source', 'a.) We will collect TCS @ 0.1% through our sales invoices, if the value of sale consideration or aggregate of sale consideration from VIVID ELECTROMECH LTD. to you exceeds Rs. 50 Lakh in current year same to reflect on your Purchase order.\nNecessary TCS certificate will be issued by us as per the provisions of the Income Tax Act 1961\nb.) Budget 2021 Update: In case of transaction on which TDS u/s. 194Q is applicable w.e.f 01/07/2021, then TCS u/s. 206C (1H) will Not be applicable'],
+    ['Freight', "In customer's scope or Extra At Actual."],
+    ['Insurance', "In customer's scope or Extra At Actual."],
+    ['Packing', 'Panels will be packed in 2 ply corrugated sheet with additional plastic sheet wrapping. Any other type of packing if required will be provided at extra cost.'],
+    ['Validity of offer', '15 days from the date of quotation and on confirmation thereafter.'],
+    ['Delivery period', 'Inspection call will be raised 7 to 9 weeks from the date of advance and or manufacturing clearance in writing whichever is later.'],
+  ];
+  const secondPageTerms = [
+    ['Delay in Dispatch Clearance', 'Post Manufacturing Clearance, and Post above mentioned Delivery Period, if there is any delay from Client Site for Dispatch clearance, we shall charge Liquidated Damages of 0.5% per week and any mutually agreed payment terms viz LC, PDC, Etc. will be null and void and 100% Balance Payment along with said LD to be Made Prior to dispatch.'],
+    ['Delay in delivery', 'Unforeseen events beyond our control such as force major, strikes, lockouts, breakdown delay in supply of essential raw materials, whether occurring in our or those of the sub-contractors works, changes in BOQ/technical specs after drawing approval, delay in approval of drawings will extend the committed delivery period for such a time as covered by such events as long as such events will have material bearing on the fulfillment of the contracts or the part thereof, which will become due.'],
+    ['Warrantee', 'The equipment is manufactured in accordance to IEC specifications. We give Warranty of 12 months from date of manufacturing. Subjected to the 100% payment clearance. We are not liable for defects of parts in due to inadequate maintenance, bad handling from long and improper storage. Any other defects of parts will be repaired /replaced (delivery ex-works) at our discretion free of cost to you provided you furnish sufficient proof to our satisfaction that the defects are entirely due to defective design and/or manufacturer /workmanship. All incidental charges for the production of such events proof will be borne by you.'],
+    ['Loading', 'In our scope.'],
+    ['Unloading at site', 'Unloading at site is not in our scope.'],
+    ['Commissioning', 'Scope of order includes supply of panels only. Commissioning assistance after installation on chargeable basis. Switchboard unloading, positioning, installation, cable joining will not be in our scope.'],
+    ['Inspection', 'At our workshop before delivery. Will be intimated by us before delivery of panels.'],
+    ['Ownership of Goods', 'The ownership of goods will be transferred to your name only after the receipt of entire payment for you.'],
+  ];
+  drawCommercialTermsPage(pdfDoc, quotationData, quotation, layout, firstPageTerms, false, false);
+  drawCommercialTermsPage(pdfDoc, quotationData, quotation, layout, secondPageTerms, true, true);
+}
+
+function drawCommercialTermsPage(pdfDoc, quotationData, quotation, layout, terms, continued, closing) {
+  const page = pdfDoc.addPage([layout.pageWidth, layout.pageHeight]);
+  const title = buildPriceScheduleTitle(quotationData, quotation);
+  drawCenteredText(page, title, 785, fitTextSize(title, layout.boldItalicFont, 12, 9, 500), layout.boldItalicFont, layout.pageWidth);
+  if (!continued) drawCenteredText(page, 'ANNEXURE-III', 765, 11, layout.boldItalicFont, layout.pageWidth);
+  let y = continued ? 748 : 735;
+  const columns = [
+    { x: 30, width: 105 },
+    { x: 135, width: 24 },
+    { x: 159, width: 406 },
+  ];
+  terms.forEach(([label, content]) => {
+    const labelLines = wrapText(label, layout.boldItalicFont, 9, columns[0].width - 8);
+    const contentLines = wrapTextWithBreaks(content, layout.italicFont, 9, columns[2].width - 10);
+    const height = Math.max(28, 12 + Math.max(labelLines.length, contentLines.length) * 11);
+    drawTableGrid(page, columns, y, height);
+    drawMultilineCell(page, labelLines, columns[0].x, y - 16, columns[0].width, 9, layout.boldItalicFont, 'left');
+    drawCellText(page, ':', columns[1].x, y - height / 2 - 3, columns[1].width, 9, layout.italicFont, 'center');
+    drawMultilineCell(page, contentLines, columns[2].x, y - 16, columns[2].width, 9, layout.italicFont, 'left');
+    y -= height;
+  });
+  if (closing) {
+    page.drawText('Hope our offers are in line with your requirement and please feel free if you have any further clarification.', {
+      x: 32,
+      y: Math.max(55, y - 28),
+      size: 9,
+      font: layout.italicFont,
+      color: rgb(0, 0, 0),
+    });
+  }
+}
+
+function wrapTextWithBreaks(text, font, size, maxWidth) {
+  return String(text || '').split('\n').flatMap((paragraph, index, paragraphs) => {
+    const lines = wrapText(paragraph, font, size, maxWidth);
+    return index < paragraphs.length - 1 ? [...lines, ''] : lines;
+  });
+}
+
 function drawPriceSchedulePages(pdfDoc, templateImage, quotationData, quotation, layout) {
   const lineItems = normalizePriceItems(quotationData.line_items);
   const rows = lineItems.length ? lineItems : [{ description: "No line items added", quantity: 0, unit_price: 0, amount: 0 }];
@@ -248,11 +428,12 @@ function drawPriceSchedulePages(pdfDoc, templateImage, quotationData, quotation,
   const gstAmount = Number(quotationData.gst_amount || 0);
   const totalAmount = Number(quotationData.final_price ?? quotationData.total_amount ?? (subtotal - discountAmount + gstAmount));
   const columns = [
-    { key: "sr", label: "Sr.no.", x: 30, width: 42, align: "center" },
-    { key: "item", label: "Item", x: 72, width: 335, align: "center" },
-    { key: "quantity", label: "Qty.", x: 407, width: 30, align: "center" },
-    { key: "unit", label: "Unit", x: 437, width: 54, align: "right" },
-    { key: "amount", label: "Amount.", x: 491, width: 74, align: "right" },
+    { key: "sr", label: "Sr.no.", x: 30, width: 40, align: "center" },
+    { key: "item", label: "Item", x: 70, width: 265, align: "center" },
+    { key: "quantity", label: "Qty.", x: 335, width: 40, align: "center" },
+    { key: "unit", label: "Unit", x: 375, width: 45, align: "center" },
+    { key: "rate", label: "Rate", x: 420, width: 70, align: "right" },
+    { key: "amount", label: "Amount", x: 490, width: 75, align: "right" },
   ];
 
   let page = createAnnexurePage(pdfDoc, templateImage, quotationData, quotation, layout, false);
@@ -275,6 +456,7 @@ function drawPriceSchedulePages(pdfDoc, templateImage, quotationData, quotation,
       sr: index + 1,
       descriptionLines,
       quantity: item.quantity,
+      unit: item.unit,
       unitPrice: item.unit_price,
       amount: item.amount,
     }, layout);
@@ -327,11 +509,12 @@ function createAnnexurePage(pdfDoc, templateImage, quotationData, quotation, lay
 
 function drawTableHeader(page, layout) {
   const columns = [
-    { label: "Sr.no.", x: 30, width: 42 },
-    { label: "Item", x: 72, width: 335 },
-    { label: "Qty.", x: 407, width: 30 },
-    { label: "Unit", x: 437, width: 54 },
-    { label: "Amount.", x: 491, width: 74 },
+    { label: "Sr.no.", x: 30, width: 40 },
+    { label: "Item", x: 70, width: 265 },
+    { label: "Qty.", x: 335, width: 40 },
+    { label: "Unit", x: 375, width: 45 },
+    { label: "Rate", x: 420, width: 70 },
+    { label: "Amount", x: 490, width: 75 },
   ];
   const y = 632;
   const height = 20;
@@ -346,18 +529,43 @@ function drawPriceRow(page, columns, y, height, row, layout) {
   drawCellText(page, String(row.sr), columns[0].x, y - height / 2 - 4, columns[0].width, 10.5, layout.regularFont, "center");
   drawMultilineCell(page, row.descriptionLines, columns[1].x, y - 16, columns[1].width, 10.5, layout.regularFont, "center");
   drawCellText(page, String(row.quantity), columns[2].x, y - height / 2 - 4, columns[2].width, 10.5, layout.regularFont, "center");
-  drawCellText(page, formatIndianNumber(row.unitPrice), columns[3].x, y - height / 2 - 4, columns[3].width - 5, 10.5, layout.regularFont, "right");
-  drawCellText(page, formatIndianNumber(row.amount), columns[4].x, y - height / 2 - 4, columns[4].width - 5, 10.5, layout.regularFont, "right");
+  drawCellText(page, String(row.unit || 'No.'), columns[3].x, y - height / 2 - 4, columns[3].width, 10, layout.regularFont, "center");
+  drawCellText(page, formatIndianNumber(row.unitPrice), columns[4].x, y - height / 2 - 4, columns[4].width - 5, 10.5, layout.regularFont, "right");
+  drawCellText(page, formatIndianNumber(row.amount), columns[5].x, y - height / 2 - 4, columns[5].width - 5, 10.5, layout.regularFont, "right");
 }
 
 function drawSummaryRow(page, columns, y, label, value, layout, { quantity = '', bold = false } = {}) {
   const height = 18;
-  drawTableGrid(page, columns, y, height);
+  drawSummaryGrid(page, columns, y, height);
   const font = bold ? layout.boldFont : layout.regularFont;
+  const labelX = columns[3].x;
+  const labelWidth = columns[3].width + columns[4].width;
+  const labelSize = fitTextSize(String(label), font, 10, 8.5, labelWidth - 10);
   drawCellText(page, quantity, columns[2].x, y - 13, columns[2].width, 10.5, font, "center");
-  drawCellText(page, label, columns[3].x, y - 13, columns[3].width, 10.5, font, "center");
-  drawCellText(page, formatIndianNumber(value), columns[4].x, y - 13, columns[4].width - 5, 10.5, font, "right");
+  drawCellText(page, label, labelX, y - 13, labelWidth, labelSize, font, "center");
+  drawCellText(page, formatIndianNumber(value), columns[5].x, y - 13, columns[5].width - 5, 10.5, font, "right");
   return y - height;
+}
+
+function drawSummaryGrid(page, columns, y, height) {
+  const tableX = columns[0].x;
+  const tableWidth = columns.reduce((sum, column) => sum + column.width, 0);
+  page.drawRectangle({
+    x: tableX,
+    y: y - height,
+    width: tableWidth,
+    height,
+    borderWidth: 0.7,
+    borderColor: rgb(0, 0, 0),
+  });
+  [columns[1].x, columns[2].x, columns[3].x, columns[5].x].forEach((x) => {
+    page.drawLine({
+      start: { x, y },
+      end: { x, y: y - height },
+      thickness: 0.7,
+      color: rgb(0, 0, 0),
+    });
+  });
 }
 
 function drawCommercialSummary(page, columns, y, totals, layout) {
@@ -492,6 +700,7 @@ function normalizePriceItems(items) {
     return {
       description: String(item.description || item.item || "").trim() || "Item",
       quantity,
+      unit: String(item.unit || 'No.'),
       unit_price: unitPrice,
       amount,
     };

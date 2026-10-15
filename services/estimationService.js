@@ -80,6 +80,7 @@ const SELECT_REQUEST = `
   q.quotation_number,
   q.status AS quotation_status,
   q.total_amount AS quotation_total,
+  q.technical_notes_data,
   q.created_at AS quotation_created_at,
   pcs.sales_data AS po_sales_data,
   pcs.estimation_data AS po_estimation_data,
@@ -367,37 +368,44 @@ async function createOrUpdateRequestQuotation(id, data, user) {
 async function submitForReview(id, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
-  if (!request.quotation_id) throw appError('Create a quotation before submitting for review.');
+  if (!request.quotation_id) throw appError('Create a quotation before submitting it to sales.');
   if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can submit this request.', 403);
   }
   if (!['in_progress', 'revision_in_progress'].includes(request.status)) {
-    throw appError('Only estimation work in progress can be submitted for review.', 409);
+    throw appError('Only estimation work in progress can be submitted to sales.', 409);
   }
-  const reviewStatus = request.status === 'revision_in_progress'
-    ? 'revision_submitted_for_review'
-    : 'submitted_for_review';
+  const masters = await getMasterSettings();
+  const requiredTechnicalFields = (masters.technical_note_fields || [])
+    .filter((field) => field.active !== false && field.required !== false);
+  const technicalValues = new Map((Array.isArray(request.technical_notes_data) ? request.technical_notes_data : [])
+    .map((item) => [String(item.code || '').toUpperCase(), String(item.value || '').trim()]));
+  const missingTechnicalFields = requiredTechnicalFields.filter((field) => !technicalValues.get(String(field.code).toUpperCase()));
+  if (missingTechnicalFields.length) {
+    throw appError(`Complete required technical notes before sending to sales: ${missingTechnicalFields.map((field) => field.label).join(', ')}.`, 409);
+  }
   await pool.query(
     `UPDATE estimation_requests
-     SET status = $2,
+     SET status = 'returned_to_sales',
          engineer_submitted_at = CURRENT_TIMESTAMP,
+         returned_to_sales_at = CURRENT_TIMESTAMP,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1`,
-    [id, reviewStatus],
+    [id],
   );
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Quotation submitted to Estimation Head for review`,
+    content: `Quotation ${request.quotation_number || ''} prepared by estimation and returned to ${request.requested_by_name || request.sales_owner_name || 'sales'}`,
   }, user);
-  const headNotification = {
-    title: 'Quotation ready for review',
-    body: `${actorName(user)} submitted quotation ${request.quotation_number || ''} for Estimation Head approval.`,
+  const salesNotification = {
+    title: 'Quotation ready for sales',
+    body: `${actorName(user)} prepared quotation ${request.quotation_number || ''} for ${request.company_name || `lead #${request.lead_id}`}.`,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,
   };
-  if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, headNotification);
-  else await notifyRole('estimation_head', headNotification);
+  if (request.requested_by_user_id) await notifyUserId(request.requested_by_user_id, salesNotification);
+  else await createNotification({ name: request.requested_by_name || request.sales_owner_name }, salesNotification);
   return getRequest(id, user);
 }
 

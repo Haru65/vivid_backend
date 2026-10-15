@@ -25,7 +25,7 @@ async function createLeadSchema() {
       segment VARCHAR(100),
       site_location VARCHAR(255),
       consultant VARCHAR(255),
-      enquiry_product VARCHAR(100),
+      enquiry_product TEXT,
       enquiry_notes TEXT,
       industry_type VARCHAR(100),
       quotation VARCHAR(255),
@@ -56,7 +56,7 @@ async function createLeadSchema() {
     ADD COLUMN IF NOT EXISTS segment VARCHAR(100),
     ADD COLUMN IF NOT EXISTS site_location VARCHAR(255),
     ADD COLUMN IF NOT EXISTS consultant VARCHAR(255),
-    ADD COLUMN IF NOT EXISTS enquiry_product VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS enquiry_product TEXT,
     ADD COLUMN IF NOT EXISTS enquiry_notes TEXT,
     ADD COLUMN IF NOT EXISTS industry_type VARCHAR(100),
     ADD COLUMN IF NOT EXISTS enquiry_number VARCHAR(50),
@@ -314,6 +314,7 @@ async function createQuotationSchema() {
       revision_type VARCHAR(50),
       customer_request TEXT,
       sales_notes TEXT,
+      technical_notes_data JSONB NOT NULL DEFAULT '[]'::jsonb,
       prepared_by_user_id BIGINT,
       reviewed_by_user_id BIGINT,
       sent_by_user_id BIGINT,
@@ -354,7 +355,8 @@ async function createQuotationSchema() {
     ADD COLUMN IF NOT EXISTS margin_percent NUMERIC(7, 2),
     ADD COLUMN IF NOT EXISTS revision_type VARCHAR(50),
     ADD COLUMN IF NOT EXISTS customer_request TEXT,
-    ADD COLUMN IF NOT EXISTS sales_notes TEXT;
+    ADD COLUMN IF NOT EXISTS sales_notes TEXT,
+    ADD COLUMN IF NOT EXISTS technical_notes_data JSONB NOT NULL DEFAULT '[]'::jsonb;
   `);
 
   await pool.query(`
@@ -732,7 +734,7 @@ async function createEstimationRequestSchema() {
       segment VARCHAR(100),
       site_location VARCHAR(255),
       consultant VARCHAR(255),
-      enquiry_product VARCHAR(100),
+      enquiry_product TEXT,
       enquiry_notes TEXT,
       requirements_summary TEXT,
       assignment_notes TEXT,

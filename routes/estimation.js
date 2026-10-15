@@ -137,7 +137,7 @@ router.post('/:id/submit-review', async (req, res) => {
   try {
     res.json(await submitForReview(req.params.id, currentUser(req)));
   } catch (error) {
-    handleError(res, 'Unable to submit estimation quotation for review', error);
+    handleError(res, 'Unable to submit estimation quotation to sales', error);
   }
 });
 

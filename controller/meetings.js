@@ -19,7 +19,7 @@ const MEETING_COLUMNS = `
   l.company_name AS lead_company_name,
   l.contact_person_name AS lead_contact_name,
   l.assigned_to AS lead_owner
-  ,l.sales_owner_id AS lead_owner_user_id
+  ,NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS lead_owner_user_id
 `;
 
 const STATUSES = new Set(['Scheduled', 'Completed', 'Cancelled']);
@@ -94,7 +94,9 @@ function meetingValues(data, fallbackOwner) {
 async function leadForMeeting(leadId) {
   if (!leadId) return null;
   const result = await pool.query(
-    'SELECT id, company_name, assigned_to, sales_owner_id FROM leads WHERE id = $1',
+    `SELECT id, company_name, assigned_to,
+       NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id
+     FROM leads WHERE id = $1`,
     [leadId],
   );
   if (!result.rows[0]) {
@@ -163,8 +165,8 @@ async function retrieveMeetings(range, user) {
        AND ($3::boolean = TRUE
          OR m.owner_user_id = $4
          OR (m.owner_user_id IS NULL AND m.owner_name = $5)
-         OR l.sales_owner_id = $4
-         OR (l.sales_owner_id IS NULL AND l.assigned_to = $5))
+         OR NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $4
+         OR (NULLIF(to_jsonb(l)->>'sales_owner_id', '') IS NULL AND l.assigned_to = $5))
      ORDER BY m.start_at ASC, m.id ASC`,
     [start, end, admin, user.id, user.name],
   );
@@ -205,8 +207,8 @@ async function retrieveMeeting(id, user) {
        AND ($2::boolean = TRUE
          OR m.owner_user_id = $3
          OR (m.owner_user_id IS NULL AND m.owner_name = $4)
-         OR l.sales_owner_id = $3
-         OR (l.sales_owner_id IS NULL AND l.assigned_to = $4))`,
+         OR NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $3
+         OR (NULLIF(to_jsonb(l)->>'sales_owner_id', '') IS NULL AND l.assigned_to = $4))`,
     [id, isAdmin(user), user.id, user.name],
   );
   return result.rows[0] || null;
