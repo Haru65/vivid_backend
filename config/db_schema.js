@@ -816,6 +816,8 @@ async function createEstimationRequestSchema() {
     CREATE TABLE IF NOT EXISTS estimation_quote_uploads (
       id SERIAL PRIMARY KEY,
       estimation_request_id INTEGER NOT NULL UNIQUE,
+      quotation_number VARCHAR(80) UNIQUE,
+      revision_number INTEGER NOT NULL DEFAULT 0,
       filename VARCHAR(255) NOT NULL,
       mime_type VARCHAR(100) NOT NULL DEFAULT 'application/pdf',
       file_size INTEGER NOT NULL CHECK (file_size > 0),
@@ -826,6 +828,18 @@ async function createEstimationRequestSchema() {
       uploaded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE estimation_quote_uploads
+    ADD COLUMN IF NOT EXISTS quotation_number VARCHAR(80),
+    ADD COLUMN IF NOT EXISTS revision_number INTEGER NOT NULL DEFAULT 0;
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS estimation_quote_uploads_number_idx
+    ON estimation_quote_uploads (quotation_number)
+    WHERE quotation_number IS NOT NULL;
   `);
 
   await pool.query(`

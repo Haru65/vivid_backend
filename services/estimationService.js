@@ -83,12 +83,14 @@ const SELECT_REQUEST = `
   l.lead_status,
   l.enquiry_state,
   l.sales_approval_status,
-  q.quotation_number,
+  COALESCE(q.quotation_number, equ.quotation_number) AS quotation_number,
   q.status AS quotation_status,
   COALESCE(q.total_amount, equ.quote_value) AS quotation_total,
   q.technical_notes_data,
   q.created_at AS quotation_created_at,
   equ.id AS uploaded_quote_id,
+  equ.quotation_number AS uploaded_quotation_number,
+  equ.revision_number AS uploaded_revision_number,
   equ.filename AS uploaded_quote_filename,
   equ.mime_type AS uploaded_quote_mime_type,
   equ.file_size AS uploaded_quote_file_size,
@@ -139,6 +141,7 @@ async function getRequest(id, user, client = pool) {
 }
 
 async function listEstimationRequests(user) {
+  await backfillUploadedQuotationNumbers();
   let result;
   if (['admin', 'sales_head', 'estimation_head'].includes(user?.role)) {
     result = await pool.query(requestQuery());
@@ -349,6 +352,51 @@ function uploadedQuoteValue(value) {
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
+function quotationNumberFormat(settings = {}) {
+  const numbering = settings.quotation_numbering || {};
+  return {
+    prefix: String(numbering.prefix || 'QT'),
+    separator: ['', '-', '/'].includes(numbering.separator) ? numbering.separator : '-',
+    padding: Number.isInteger(Number(numbering.padding)) ? Number(numbering.padding) : 5,
+  };
+}
+
+async function nextUploadedQuotationNumber(db, format) {
+  const sequence = await db.query(`SELECT nextval('quotation_number_seq') AS number`);
+  return `${format.prefix}${format.separator}${String(sequence.rows[0].number).padStart(format.padding, '0')}`;
+}
+
+async function backfillUploadedQuotationNumbers() {
+  const settings = await getMasterSettings();
+  const format = quotationNumberFormat(settings);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const missing = await client.query(
+      `SELECT id
+       FROM estimation_quote_uploads
+       WHERE quotation_number IS NULL
+       ORDER BY id
+       FOR UPDATE`,
+    );
+    for (const upload of missing.rows) {
+      const quotationNumber = await nextUploadedQuotationNumber(client, format);
+      await client.query(
+        `UPDATE estimation_quote_uploads
+         SET quotation_number = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [quotationNumber, upload.id],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
@@ -371,20 +419,40 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   const filename = uploadedPdfFilename(metadata.filename);
   const quoteValue = uploadedQuoteValue(metadata.quote_value);
   const isRevision = ['revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status);
+  const isSalesRevision = request.status === 'revision_requested_by_sales';
   const nextStatus = isEngineer
     ? (isRevision ? 'revision_submitted_for_review' : 'submitted_for_review')
     : (isRevision ? 'revision_in_progress' : 'in_progress');
+  const numberFormat = quotationNumberFormat(await getMasterSettings());
+  let uploadedQuotationNumber = request.uploaded_quotation_number || null;
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const existingUpload = await client.query(
+      `SELECT quotation_number, revision_number
+       FROM estimation_quote_uploads
+       WHERE estimation_request_id = $1
+       FOR UPDATE`,
+      [id],
+    );
+    let quotationNumber = existingUpload.rows[0]?.quotation_number
+      || await nextUploadedQuotationNumber(client, numberFormat);
+    let revisionNumber = Number(existingUpload.rows[0]?.revision_number || 0);
+    if (isSalesRevision) {
+      revisionNumber += 1;
+      quotationNumber = `${String(quotationNumber).replace(/-R\d+$/i, '')}-R${revisionNumber}`;
+    }
+    uploadedQuotationNumber = quotationNumber;
     await client.query(
       `INSERT INTO estimation_quote_uploads (
-         estimation_request_id, filename, mime_type, file_size, quote_value, pdf_data,
+         estimation_request_id, quotation_number, revision_number, filename, mime_type, file_size, quote_value, pdf_data,
          uploaded_by_user_id, uploaded_by_name, uploaded_at, updated_at
-       ) VALUES ($1, $2, 'application/pdf', $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ) VALUES ($1, $2, $3, $4, 'application/pdf', $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
        ON CONFLICT (estimation_request_id) DO UPDATE
-       SET filename = EXCLUDED.filename,
+       SET quotation_number = EXCLUDED.quotation_number,
+           revision_number = EXCLUDED.revision_number,
+           filename = EXCLUDED.filename,
            mime_type = EXCLUDED.mime_type,
            file_size = EXCLUDED.file_size,
            quote_value = EXCLUDED.quote_value,
@@ -393,7 +461,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
            uploaded_by_name = EXCLUDED.uploaded_by_name,
            uploaded_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP`,
-      [id, filename, pdf.length, quoteValue, pdf, user?.id || null, actorName(user)],
+      [id, quotationNumber, revisionNumber, filename, pdf.length, quoteValue, pdf, user?.id || null, actorName(user)],
     );
     await client.query(
       `UPDATE estimation_requests
@@ -420,12 +488,12 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
 
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `${actorName(user)} uploaded quotation PDF ${filename} with value ${quoteValue.toFixed(2)}${isEngineer ? ' for Estimation Head review' : ''}`,
+    content: `${actorName(user)} uploaded quotation ${uploadedQuotationNumber} with value ${quoteValue.toFixed(2)}${isEngineer ? ' for Estimation Head review' : ''}`,
   }, user);
   if (isEngineer) {
     const notification = {
       title: 'Quotation PDF ready for review',
-      body: `${actorName(user)} uploaded ${filename} for ${request.company_name || `lead #${request.lead_id}`}.`,
+      body: `${actorName(user)} uploaded quotation ${uploadedQuotationNumber} for ${request.company_name || `lead #${request.lead_id}`}.`,
       category: 'estimation',
       link_type: 'estimation_request',
       link_id: request.id,
@@ -438,8 +506,9 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
 
 async function getUploadedRequestQuotationPdf(id, user) {
   await getRequest(id, user);
+  await backfillUploadedQuotationNumbers();
   const result = await pool.query(
-    `SELECT filename, mime_type, file_size, quote_value, pdf_data
+    `SELECT quotation_number, revision_number, filename, mime_type, file_size, quote_value, pdf_data
      FROM estimation_quote_uploads
      WHERE estimation_request_id = $1`,
     [id],
@@ -469,7 +538,7 @@ async function sendUploadedRequestQuotation(id, user) {
 
   await sendEmail({
     to: recipient,
-    subject: `Quotation - ${request.company_name || request.project_name || 'Vivid Electromech'}`,
+    subject: `Quotation ${uploaded.quotation_number} - ${request.company_name || request.project_name || 'Vivid Electromech'}`,
     html: `<p>Dear ${escapeEmailHtml(request.contact_person_name || 'Customer')},</p><p>Please find attached our quotation for ${escapeEmailHtml(request.project_name || request.company_name || 'your enquiry')}.</p><p>Regards,<br>${escapeEmailHtml(actorName(user) || 'Vivid Electromech')}</p>`,
     attachments: [{ filename: uploaded.filename, content: uploaded.pdf_data }],
   });
@@ -485,11 +554,11 @@ async function sendUploadedRequestQuotation(id, user) {
          lead_status = CASE WHEN lead_status IN ('Proposal Accepted', 'Lost') THEN lead_status ELSE 'Proposal Sent' END,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $2`,
-    [uploaded.filename, request.lead_id],
+    [uploaded.quotation_number, request.lead_id],
   );
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Uploaded quotation ${uploaded.filename} emailed to ${recipient}`,
+    content: `Quotation ${uploaded.quotation_number} emailed to ${recipient}`,
   }, user);
   return getRequest(id, user);
 }

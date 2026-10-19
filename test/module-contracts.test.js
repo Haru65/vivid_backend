@@ -64,6 +64,16 @@ test('sales forwards revision notes while estimation creates the revision quotat
   assert.match(estimationSaveFlow, /createQuotationRevision\(request\.quotation_id/);
 });
 
+test('uploaded PDFs receive quotation numbers instead of using their filenames', () => {
+  const serviceSource = fs.readFileSync(path.join(__dirname, '../services/estimationService.js'), 'utf8');
+
+  assert.match(serviceSource, /COALESCE\(q\.quotation_number, equ\.quotation_number\) AS quotation_number/);
+  assert.match(serviceSource, /nextval\('quotation_number_seq'\)/);
+  assert.match(serviceSource, /estimation_request_id, quotation_number, revision_number, filename/);
+  assert.match(serviceSource, /\[uploaded\.quotation_number, request\.lead_id\]/);
+  assert.doesNotMatch(serviceSource, /\[uploaded\.filename, request\.lead_id\]/);
+});
+
 test('postal lookup maps district and state into lead location fields', () => {
   const location = normalizePostalResponse({
     success: true,
