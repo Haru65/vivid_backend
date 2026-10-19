@@ -22,7 +22,7 @@ const DEFAULT_MASTER_SETTINGS = {
     { code: 'IP_RATING', section: 'General', label: 'Degree of protection', pdf_label: 'IP Rating / Degree of Protection', input_type: 'select', options: ['IP42', 'IP52', 'IP54', 'IP55', 'IP65'], default_value: 'IP54', required: true, active: true, display_order: 10 },
     { code: 'INSTALLATION', section: 'General', label: 'Installation', pdf_label: 'Installation', input_type: 'select', options: ['Indoor', 'Outdoor'], default_value: 'Indoor', required: true, active: true, display_order: 20 },
     { code: 'PAINT', section: 'Construction', label: 'Paint shade', pdf_label: 'Paint Shade', input_type: 'text', options: [], default_value: 'RAL7032', required: true, active: true, display_order: 30 },
-    { code: 'BUSBAR', section: 'Busbar', label: 'Busbar specification', pdf_label: 'Busbar', input_type: 'text', options: [], default_value: '', required: true, active: true, display_order: 40 },
+    { code: 'BUSBAR', section: 'Busbar', label: 'Busbar specification', pdf_label: 'Busbar', input_type: 'select', options: ['Aluminum', 'Copper'], default_value: '', required: true, active: true, display_order: 40 },
     { code: 'METER', section: 'Metering and protection', label: 'Meter specification', pdf_label: 'Meter', input_type: 'text', options: [], default_value: '', required: true, active: true, display_order: 50 },
     { code: 'RELAY', section: 'Metering and protection', label: 'Relay specification', pdf_label: 'Relay', input_type: 'text', options: [], default_value: '', required: true, active: true, display_order: 60 },
   ],
@@ -100,14 +100,15 @@ function normalizeTechnicalNoteFields(value, fallback = []) {
     const label = cleanText(item.label, 200);
     if (!code || !label || seen.has(code)) return null;
     seen.add(code);
-    const inputType = ['select', 'text', 'number'].includes(item.input_type) ? item.input_type : 'text';
+    const isBusbar = code === 'BUSBAR';
+    const inputType = isBusbar ? 'select' : ['select', 'text', 'number'].includes(item.input_type) ? item.input_type : 'text';
     return {
       code,
       section: cleanText(item.section, 100) || 'General',
       label,
       pdf_label: cleanText(item.pdf_label, 200) || label,
       input_type: inputType,
-      options: inputType === 'select' ? normalizeMasterList(item.options, []) : [],
+      options: isBusbar ? ['Aluminum', 'Copper'] : inputType === 'select' ? normalizeMasterList(item.options, []) : [],
       default_value: cleanText(item.default_value, 500),
       required: item.required !== false,
       active: item.active !== false,
