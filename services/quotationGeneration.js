@@ -390,14 +390,18 @@ function drawCommercialTermsPage(pdfDoc, quotationData, quotation, layout, terms
     { x: 135, width: 24 },
     { x: 159, width: 406 },
   ];
+  const lineHeight = 12;
+  const topPadding = 16;
+  const bottomPadding = 8;
   terms.forEach(([label, content]) => {
     const labelLines = wrapText(label, layout.boldItalicFont, 9, columns[0].width - 8);
     const contentLines = wrapTextWithBreaks(content, layout.italicFont, 9, columns[2].width - 10);
-    const height = Math.max(28, 12 + Math.max(labelLines.length, contentLines.length) * 11);
+    const lineCount = Math.max(labelLines.length, contentLines.length);
+    const height = Math.max(30, topPadding + ((lineCount - 1) * lineHeight) + bottomPadding);
     drawTableGrid(page, columns, y, height);
-    drawMultilineCell(page, labelLines, columns[0].x, y - 16, columns[0].width, 9, layout.boldItalicFont, 'left');
+    drawMultilineCell(page, labelLines, columns[0].x, y - topPadding, columns[0].width, 9, layout.boldItalicFont, 'left');
     drawCellText(page, ':', columns[1].x, y - height / 2 - 3, columns[1].width, 9, layout.italicFont, 'center');
-    drawMultilineCell(page, contentLines, columns[2].x, y - 16, columns[2].width, 9, layout.italicFont, 'left');
+    drawMultilineCell(page, contentLines, columns[2].x, y - topPadding, columns[2].width, 9, layout.italicFont, 'left');
     y -= height;
   });
   if (closing) {

@@ -5,6 +5,7 @@ const { notifyUserId } = require('../services/notificationService');
 const LEAD_COLUMNS = `
   id,
   company_name,
+  project_name,
   contact_person_name,
   contact_person_email,
   contact_person_phone,
@@ -33,6 +34,7 @@ const LEAD_COLUMNS = `
 const LEAD_TABLE_COLUMNS = `
   l.id,
   l.company_name,
+  l.project_name,
   l.contact_person_name,
   l.contact_person_email,
   l.contact_person_phone,
@@ -311,6 +313,7 @@ function leadUpdateActivities(previous, next) {
 
   const detailFields = [
     ['company_name', 'company name'],
+    ['project_name', 'project name'],
     ['contact_person_name', 'contact person'],
     ['contact_person_email', 'contact email'],
     ['contact_person_phone', 'contact phone'],
@@ -367,6 +370,7 @@ function leadValues(leadData) {
     enquiryState,
     salesApprovalStatus,
     status === 'Lost' ? text(leadData.loss_reason, 'Loss reason', 255, true) : null,
+    text(leadData.project_name, 'Project name', 255, true),
   ];
 }
 
@@ -707,8 +711,9 @@ async function createLead(leadData, user) {
         raw_data,
         enquiry_state,
         sales_approval_status,
-        loss_reason
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        loss_reason,
+        project_name
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
       RETURNING ${LEAD_COLUMNS}`,
       insertValues,
     );
@@ -808,8 +813,9 @@ async function updateLead(id, leadData, user) {
          enquiry_state = $22,
          sales_approval_status = $23,
          loss_reason = $24,
+         project_name = $25,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $25
+     WHERE id = $26
      RETURNING ${LEAD_COLUMNS}`,
       updateValues,
     );
@@ -825,6 +831,16 @@ async function updateLead(id, leadData, user) {
          WHERE lead_id = $3
            AND status NOT IN ('cancelled', 'discarded')`,
         [owner.id, owner.name, id],
+      );
+    }
+    if (changed(previous, lead, 'project_name')) {
+      await client.query(
+        `UPDATE estimation_requests
+         SET project_name = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = $2
+           AND status NOT IN ('cancelled', 'discarded')`,
+        [lead.project_name, id],
       );
     }
     await client.query('COMMIT');

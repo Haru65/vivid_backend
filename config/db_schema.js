@@ -11,6 +11,7 @@ async function createLeadSchema() {
       id SERIAL PRIMARY KEY,
       enquiry_number VARCHAR(50) UNIQUE,
       company_name VARCHAR(255) NOT NULL,
+      project_name VARCHAR(255),
       contact_person_name VARCHAR(255) NOT NULL,
       contact_person_email VARCHAR(255) NOT NULL,
       contact_person_phone VARCHAR(20) NOT NULL,
@@ -47,6 +48,7 @@ async function createLeadSchema() {
   // CREATE TABLE IF NOT EXISTS does not add columns to an existing table.
   await pool.query(`
     ALTER TABLE leads
+    ADD COLUMN IF NOT EXISTS project_name VARCHAR(255),
     ADD COLUMN IF NOT EXISTS quotation VARCHAR(255),
     ADD COLUMN IF NOT EXISTS enquiry_date DATE NOT NULL DEFAULT CURRENT_DATE,
     ADD COLUMN IF NOT EXISTS enquiry_state VARCHAR(20) NOT NULL DEFAULT 'Purchase',
@@ -732,6 +734,7 @@ async function createEstimationRequestSchema() {
       status VARCHAR(50) NOT NULL DEFAULT 'submitted'
         CHECK (status IN ('submitted', 'assigned', 'in_progress', 'submitted_for_review', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress', 'revision_submitted_for_review', 'approved', 'returned_to_sales', 'sent_to_client', 'client_approved', 'discarded', 'po_sales_draft', 'po_submitted_to_estimation', 'po_estimation_in_progress', 'po_submitted_to_head', 'po_approved_by_estimation_head', 'cancelled')),
       segment VARCHAR(100),
+      project_name VARCHAR(255),
       site_location VARCHAR(255),
       consultant VARCHAR(255),
       enquiry_product TEXT,
@@ -755,6 +758,7 @@ async function createEstimationRequestSchema() {
   await pool.query(`
     ALTER TABLE estimation_requests
     ADD COLUMN IF NOT EXISTS customer_id INTEGER,
+    ADD COLUMN IF NOT EXISTS project_name VARCHAR(255),
     ADD COLUMN IF NOT EXISTS quotation_id INTEGER,
     ADD COLUMN IF NOT EXISTS requested_by_user_id BIGINT,
     ADD COLUMN IF NOT EXISTS sales_owner_id BIGINT,

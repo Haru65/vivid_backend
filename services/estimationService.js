@@ -70,6 +70,7 @@ function autoPoNumber(request) {
 
 const SELECT_REQUEST = `
   er.*,
+  COALESCE(er.project_name, l.project_name) AS project_name,
   l.company_name,
   l.contact_person_name,
   l.contact_person_email,
@@ -169,7 +170,7 @@ async function submitLeadToEstimation(leadId, user) {
   try {
     await client.query('BEGIN');
     const leadResult = await client.query(
-      `SELECT id, customer_id, company_name, assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, segment, site_location,
+      `SELECT id, customer_id, company_name, project_name, assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, segment, site_location,
               consultant, enquiry_product, enquiry_notes, requirements_summary
        FROM leads
        WHERE id = $1
@@ -203,9 +204,9 @@ async function submitLeadToEstimation(leadId, user) {
     const insert = await client.query(
       `INSERT INTO estimation_requests (
         lead_id, customer_id, requested_by_user_id, requested_by_name, sales_owner_id, sales_owner_name,
-        estimation_head_id, estimation_head_name, status, segment, site_location, consultant,
+        estimation_head_id, estimation_head_name, status, segment, project_name, site_location, consultant,
         enquiry_product, enquiry_notes, requirements_summary
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'submitted', $9, $10, $11, $12, $13, $14)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'submitted', $9, $10, $11, $12, $13, $14, $15)
       RETURNING *`,
       [
         lead.id,
@@ -217,6 +218,7 @@ async function submitLeadToEstimation(leadId, user) {
         estimationHead?.id || null,
         headName,
         lead.segment || null,
+        lead.project_name || null,
         lead.site_location || null,
         lead.consultant || null,
         lead.enquiry_product || null,
@@ -244,7 +246,7 @@ async function submitLeadToEstimation(leadId, user) {
   }, user);
   const notification = {
     title: 'New enquiry for estimation',
-    body: `${request.sales_owner_name || request.requested_by_name} submitted ${request.enquiry_product || 'an enquiry'} for ${request.company_name || `lead #${leadId}`}.`,
+    body: `${request.sales_owner_name || request.requested_by_name} submitted ${request.project_name || request.enquiry_product || 'an enquiry'} for ${request.company_name || `lead #${leadId}`}.`,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,
