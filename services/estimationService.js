@@ -10,6 +10,7 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const HEAD_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
 const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson']);
 const ESTIMATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer']);
+let uploadedQuotationBackfillComplete = false;
 
 function appError(message, statusCode = 400) {
   const error = new Error(message);
@@ -361,12 +362,17 @@ function quotationNumberFormat(settings = {}) {
   };
 }
 
+function requestQuotationNumber(request) {
+  return request.quotation_number || request.uploaded_quotation_number || 'quotation';
+}
+
 async function nextUploadedQuotationNumber(db, format) {
   const sequence = await db.query(`SELECT nextval('quotation_number_seq') AS number`);
   return `${format.prefix}${format.separator}${String(sequence.rows[0].number).padStart(format.padding, '0')}`;
 }
 
 async function backfillUploadedQuotationNumbers() {
+  if (uploadedQuotationBackfillComplete) return;
   const settings = await getMasterSettings();
   const format = quotationNumberFormat(settings);
   const client = await pool.connect();
@@ -388,7 +394,19 @@ async function backfillUploadedQuotationNumbers() {
         [quotationNumber, upload.id],
       );
     }
+    await client.query(
+      `UPDATE lead_activities AS activity
+       SET content = REPLACE(activity.content, upload.filename, upload.quotation_number)
+       FROM estimation_requests AS request
+       JOIN estimation_quote_uploads AS upload
+         ON upload.estimation_request_id = request.id
+       WHERE activity.lead_id = request.lead_id
+         AND activity.activity_type = 'system'
+         AND upload.quotation_number IS NOT NULL
+         AND POSITION(upload.filename IN activity.content) > 0`,
+    );
     await client.query('COMMIT');
+    uploadedQuotationBackfillComplete = true;
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
@@ -667,13 +685,13 @@ async function submitForReview(id, user) {
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
     content: isEngineer
-      ? `Quotation ${request.quotation_number || request.uploaded_quote_filename || ''} submitted to Estimation Head for review`
-      : `Quotation ${request.quotation_number || request.uploaded_quote_filename || ''} returned to ${request.requested_by_name || request.sales_owner_name || 'sales'}`,
+      ? `Quotation ${requestQuotationNumber(request)} submitted to Estimation Head for review`
+      : `Quotation ${requestQuotationNumber(request)} returned to ${request.requested_by_name || request.sales_owner_name || 'sales'}`,
   }, user);
   if (isEngineer) {
     const reviewNotification = {
       title: 'Quotation ready for review',
-      body: `${actorName(user)} submitted ${request.quotation_number || request.uploaded_quote_filename || 'a quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+      body: `${actorName(user)} submitted ${requestQuotationNumber(request)} for ${request.company_name || `lead #${request.lead_id}`}.`,
       category: 'estimation',
       link_type: 'estimation_request',
       link_id: request.id,
@@ -683,7 +701,7 @@ async function submitForReview(id, user) {
   } else {
     const salesNotification = {
       title: 'Quotation ready for sales',
-      body: `${actorName(user)} prepared ${request.quotation_number || request.uploaded_quote_filename || 'a quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+      body: `${actorName(user)} prepared ${requestQuotationNumber(request)} for ${request.company_name || `lead #${request.lead_id}`}.`,
       category: 'estimation',
       link_type: 'estimation_request',
       link_id: request.id,
@@ -755,18 +773,18 @@ async function approveRequest(id, data, user) {
   }
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Estimation approved quotation ${request.quotation_number || request.uploaded_quote_filename || ''} and returned it to sales`,
+    content: `Estimation approved quotation ${requestQuotationNumber(request)} and returned it to sales`,
   }, user);
   if (request.sales_owner_id) await notifyUserId(request.sales_owner_id, {
     title: 'Quotation returned to sales',
-    body: `Estimation approved ${request.quotation_number || request.uploaded_quote_filename || 'the quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+    body: `Estimation approved ${requestQuotationNumber(request)} for ${request.company_name || `lead #${request.lead_id}`}.`,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,
   });
   else await createNotification({ name: request.sales_owner_name || request.requested_by_name }, {
     title: 'Quotation returned to sales',
-    body: `Estimation approved ${request.quotation_number || request.uploaded_quote_filename || 'the quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+    body: `Estimation approved ${requestQuotationNumber(request)} for ${request.company_name || `lead #${request.lead_id}`}.`,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,

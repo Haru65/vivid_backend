@@ -72,6 +72,8 @@ test('uploaded PDFs receive quotation numbers instead of using their filenames',
   assert.match(serviceSource, /estimation_request_id, quotation_number, revision_number, filename/);
   assert.match(serviceSource, /\[uploaded\.quotation_number, request\.lead_id\]/);
   assert.doesNotMatch(serviceSource, /\[uploaded\.filename, request\.lead_id\]/);
+  assert.doesNotMatch(serviceSource, /request\.uploaded_quote_filename/);
+  assert.match(serviceSource, /REPLACE\(activity\.content, upload\.filename, upload\.quotation_number\)/);
 });
 
 test('postal lookup maps district and state into lead location fields', () => {
