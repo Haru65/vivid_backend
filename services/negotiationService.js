@@ -3,7 +3,7 @@ const { logLeadActivity } = require('../controller/leads');
 const { checkNegotiationApprovalRequirement, extractNumber } = require('./negotiationAuthorityService');
 
 const NEGOTIATION_TYPES = new Set(['discount', 'final_price', 'payment_terms', 'delivery_extension', 'warranty', 'other']);
-const NEGOTIATION_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson']);
+const NEGOTIATION_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales']);
 const APPROVER_ROLES = new Set(['admin', 'sales_head']);
 
 function appError(message, statusCode = 400) {
@@ -181,7 +181,7 @@ async function quotationForAccess(client, quotationId, user, lock = false) {
   );
   const quotation = result.rows[0];
   if (!quotation) throw appError('Quotation not found.', 404);
-  if (['salesperson', 'sales_engineer'].includes(user?.role)
+  if (['salesperson', 'sales_engineer', 'presales'].includes(user?.role)
       && String(quotation.sales_owner_id || '') !== String(user.id || '')
       && quotation.assigned_to !== user.name) {
     throw appError('Salespersons can negotiate only their assigned lead quotations.', 403);

@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const quotations = require('../controller/quotations');
-const { hashPassword, verifyPassword } = require('../controller/userManagement');
+const { hashPassword, USER_ROLES, verifyPassword } = require('../controller/userManagement');
 const { validateAuthConfiguration } = require('../middleware/auth');
 const { normalizePostalResponse } = require('../services/postalService');
 
@@ -27,6 +27,18 @@ test('password hashing accepts valid passwords and rejects invalid credentials',
   assert.equal(verifyPassword('safe-pass-123', hash), true);
   assert.equal(verifyPassword('wrong-pass-123', hash), false);
   assert.throws(() => hashPassword('short'), /at least 8 characters/);
+});
+
+test('presales is a supported hybrid sales and estimation role', () => {
+  const estimationSource = fs.readFileSync(path.join(__dirname, '../services/estimationService.js'), 'utf8');
+  const quotationSource = fs.readFileSync(path.join(__dirname, '../controller/quotations.js'), 'utf8');
+
+  assert.equal(USER_ROLES.has('presales'), true);
+  assert.match(estimationSource, /SALES_ROLES[^\n]*'presales'/);
+  assert.match(estimationSource, /ESTIMATION_ROLES[^\n]*'presales'/);
+  assert.match(estimationSource, /ESTIMATION_CONTRIBUTOR_ROLES[^\n]*'presales'/);
+  assert.match(quotationSource, /PREPARATION_ROLES[^\n]*'presales'/);
+  assert.match(quotationSource, /SALES_ROLES[^\n]*'presales'/);
 });
 
 test('production authentication requires an explicit JWT secret', () => {

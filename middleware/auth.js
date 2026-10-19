@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db_connection');
 
-const VALID_ROLES = new Set(['admin', 'salesperson', 'sales_head', 'sales_engineer', 'estimation_head', 'estimation_engineer', 'erp']);
+const VALID_ROLES = new Set(['admin', 'salesperson', 'sales_head', 'sales_engineer', 'presales', 'estimation_head', 'estimation_engineer', 'erp']);
 
 function jwtSecret() {
   const configured = String(process.env.JWT_SECRET || '').trim();

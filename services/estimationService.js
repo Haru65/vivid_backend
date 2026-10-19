@@ -8,8 +8,10 @@ const { sendEmail } = require('./emailService');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const HEAD_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
-const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson']);
-const ESTIMATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer']);
+const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales']);
+const ESTIMATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer', 'presales']);
+const ESTIMATION_CONTRIBUTOR_ROLES = new Set(['estimation_engineer', 'presales']);
+const INDIVIDUAL_SALES_ROLES = new Set(['sales_engineer', 'salesperson', 'presales']);
 let uploadedQuotationBackfillComplete = false;
 
 function appError(message, statusCode = 400) {
@@ -126,9 +128,16 @@ function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
 
 function canViewRequest(user, request) {
   if (['admin', 'estimation_head', 'sales_head'].includes(user?.role)) return true;
-  if (user?.role === 'estimation_engineer') return String(request.assigned_engineer_id || '') === String(user.id || '');
-  if (['sales_engineer', 'salesperson'].includes(user?.role)) {
-    return request.sales_owner_name === user.name || request.requested_by_name === user.name || String(request.sales_owner_id || '') === String(user.id || '');
+  const assignedEstimator = ESTIMATION_CONTRIBUTOR_ROLES.has(user?.role)
+    && String(request.assigned_engineer_id || '') === String(user.id || '');
+  const ownsSalesRequest = INDIVIDUAL_SALES_ROLES.has(user?.role)
+    && (request.sales_owner_name === user.name
+      || request.requested_by_name === user.name
+      || String(request.sales_owner_id || '') === String(user.id || ''));
+  if (user?.role === 'presales') return assignedEstimator || ownsSalesRequest;
+  if (user?.role === 'estimation_engineer') return assignedEstimator;
+  if (INDIVIDUAL_SALES_ROLES.has(user?.role)) {
+    return ownsSalesRequest;
   }
   return false;
 }
@@ -146,6 +155,10 @@ async function listEstimationRequests(user) {
   let result;
   if (['admin', 'sales_head', 'estimation_head'].includes(user?.role)) {
     result = await pool.query(requestQuery());
+  } else if (user?.role === 'presales') {
+    result = await pool.query(requestQuery(
+      'WHERE er.assigned_engineer_id = $1 OR er.requested_by_user_id = $1 OR er.sales_owner_id = $1 OR er.requested_by_name = $2 OR er.sales_owner_name = $2',
+    ), [user.id, actorName(user)]);
   } else if (user?.role === 'estimation_engineer') {
     result = await pool.query(requestQuery('WHERE er.assigned_engineer_id = $1'), [user.id]);
   } else {
@@ -197,7 +210,7 @@ async function submitLeadToEstimation(leadId, user) {
     );
     const lead = leadResult.rows[0];
     if (!lead) throw appError('Lead not found.', 404);
-    if (['salesperson', 'sales_engineer'].includes(user?.role)
+    if (INDIVIDUAL_SALES_ROLES.has(user?.role)
       && String(lead.sales_owner_id || '') !== String(user?.id || '')
       && lead.assigned_to !== actorName(user)) {
       throw appError('You can submit only leads assigned to you.', 403);
@@ -231,7 +244,7 @@ async function submitLeadToEstimation(leadId, user) {
         lead.customer_id || null,
         user?.id || null,
         actorName(user),
-        lead.sales_owner_id || (['salesperson', 'sales_engineer'].includes(user?.role) ? user?.id : null),
+        lead.sales_owner_id || (INDIVIDUAL_SALES_ROLES.has(user?.role) ? user?.id : null),
         lead.assigned_to || actorName(user),
         estimationHead?.id || null,
         headName,
@@ -290,10 +303,10 @@ async function assignRequest(id, data, user) {
     }
     const engineer = await client.query(
       `SELECT id, first_name, last_name FROM users
-       WHERE id = $1 AND is_active = TRUE AND role = 'estimation_engineer'`,
+       WHERE id = $1 AND is_active = TRUE AND role IN ('estimation_engineer', 'presales')`,
       [engineerId],
     );
-    if (!engineer.rows[0]) throw appError('Select an active estimation engineer.', 404);
+    if (!engineer.rows[0]) throw appError('Select an active estimation engineer or presales user.', 404);
     engineerName = [engineer.rows[0].first_name, engineer.rows[0].last_name].filter(Boolean).join(' ');
     const updated = await client.query(
       `UPDATE estimation_requests
@@ -418,7 +431,7 @@ async function backfillUploadedQuotationNumbers() {
 async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
-  const isEngineer = user.role === 'estimation_engineer';
+  const isEngineer = ESTIMATION_CONTRIBUTOR_ROLES.has(user.role);
   if (isEngineer && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can upload this quotation.', 403);
   }
@@ -587,7 +600,7 @@ async function createOrUpdateRequestQuotation(id, data, user) {
   const selfAssigningHead = request.status === 'submitted'
     && !request.assigned_engineer_id
     && isEstimationHead(user);
-  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+  if (ESTIMATION_CONTRIBUTOR_ROLES.has(user.role) && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can prepare this quotation.', 403);
   }
   if (!selfAssigningHead && !['assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status)) {
@@ -651,7 +664,7 @@ async function submitForReview(id, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
   if (!request.quotation_id && !request.uploaded_quote_id) throw appError('Prepare or upload a quotation before submitting it.');
-  const isEngineer = user.role === 'estimation_engineer';
+  const isEngineer = ESTIMATION_CONTRIBUTOR_ROLES.has(user.role);
   if (isEngineer && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can submit this request.', 403);
   }
@@ -992,7 +1005,7 @@ async function savePoEstimation(id, data, user) {
   const request = await getRequest(id, user);
   if (!request.po_closure_sheet_id) throw appError('Sales must submit PO sheet first.');
   if (request.status !== 'po_submitted_to_estimation') throw appError('PO estimation section can be filled only after sales submits the PO sheet.');
-  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+  if (ESTIMATION_CONTRIBUTOR_ROLES.has(user.role) && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can fill this PO sheet.', 403);
   }
   const values = jsonObject(data, 'PO estimation data');

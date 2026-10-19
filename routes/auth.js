@@ -102,7 +102,7 @@ router.get('/users', authenticateToken, async (req, res) => {
 router.get(
   '/approval-users',
   authenticateToken,
-  requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'estimation_head', 'estimation_engineer'),
+  requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales', 'estimation_head', 'estimation_engineer'),
   async (req, res) => {
   try {
     res.json(await listApprovalUsers());

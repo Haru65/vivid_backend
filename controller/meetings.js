@@ -134,7 +134,7 @@ async function resolveMeetingOwner(values, user) {
      FROM users
      WHERE id = $1
        AND is_active = TRUE
-       AND role IN ('admin', 'sales_head', 'sales_engineer', 'salesperson')`,
+       AND role IN ('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales')`,
     [ownerUserId],
   );
   const owner = result.rows[0];

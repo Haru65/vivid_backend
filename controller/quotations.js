@@ -5,8 +5,8 @@ const { generateQuotationPdf } = require('../services/quotationGeneration');
 const { getMasterSettings } = require('./settings');
 
 const GLOBAL_VIEW_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
-const PREPARATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer']);
-const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson']);
+const PREPARATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer', 'presales']);
+const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales']);
 
 function appError(message, statusCode = 400) {
   const error = new Error(message);
@@ -35,12 +35,18 @@ function sameName(left, right) {
 }
 
 function isIndividualSales(user) {
-  return ['salesperson', 'sales_engineer'].includes(roleOf(user));
+  return ['salesperson', 'sales_engineer', 'presales'].includes(roleOf(user));
 }
 
 function canViewQuotation(quotation, user) {
   const role = roleOf(user);
   if (GLOBAL_VIEW_ROLES.has(role)) return true;
+  if (role === 'presales') {
+    return sameId(quotation.sales_owner_id, user?.id)
+      || sameName(quotation.assigned_to, actorName(user))
+      || sameId(quotation.prepared_by_user_id, user?.id)
+      || sameId(quotation.assigned_engineer_id, user?.id);
+  }
   if (isIndividualSales(user)) {
     return sameId(quotation.sales_owner_id, user?.id) || sameName(quotation.assigned_to, actorName(user));
   }
@@ -54,7 +60,7 @@ function canViewQuotation(quotation, user) {
 function canManageQuotation(quotation, user) {
   const role = roleOf(user);
   if (['admin', 'estimation_head'].includes(role)) return true;
-  return role === 'estimation_engineer'
+  return ['estimation_engineer', 'presales'].includes(role)
     && (sameId(quotation.prepared_by_user_id, user?.id) || sameId(quotation.assigned_engineer_id, user?.id));
 }
 
@@ -328,7 +334,7 @@ async function leadForPreparation(db, leadId, user) {
   if (!lead) throw appError('Lead not found.', 404);
   const role = roleOf(user);
   if (!PREPARATION_ROLES.has(role)) throw appError('Only estimation users or admin can prepare quotations.', 403);
-  if (role === 'estimation_engineer' && !sameId(lead.assigned_engineer_id, user?.id)) {
+  if (['estimation_engineer', 'presales'].includes(role) && !sameId(lead.assigned_engineer_id, user?.id)) {
     throw appError('Only the assigned estimation engineer can prepare this quotation.', 403);
   }
   return lead;
@@ -338,7 +344,16 @@ async function retrieveQuotations(user) {
   const role = roleOf(user);
   let where = '';
   let params = [];
-  if (isIndividualSales(user)) {
+  if (role === 'presales') {
+    params = [user?.id || null, actorName(user)];
+    where = `WHERE EXISTS (
+      SELECT 1 FROM leads l
+      WHERE l.id = q.lead_id
+        AND (NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1 OR LOWER(TRIM(l.assigned_to)) = LOWER(TRIM($2)))
+    )
+    OR q.prepared_by_user_id = $1
+    OR EXISTS (SELECT 1 FROM estimation_requests er WHERE er.id = q.estimation_request_id AND er.assigned_engineer_id = $1)`;
+  } else if (isIndividualSales(user)) {
     params = [user?.id || null, actorName(user)];
     where = `WHERE EXISTS (
       SELECT 1 FROM leads l

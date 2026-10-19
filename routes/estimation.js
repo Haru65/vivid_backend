@@ -25,7 +25,7 @@ const {
 const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'estimation_head', 'estimation_engineer'));
+router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales', 'estimation_head', 'estimation_engineer'));
 
 
 function currentUser(req) {

@@ -20,8 +20,8 @@ const {
 const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
-const salesHandoverAccess = requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'erp');
-const salesHandoverWrite = requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson');
+const salesHandoverAccess = requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales', 'erp');
+const salesHandoverWrite = requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales');
 const erpAccess = requireRoles('admin', 'erp');
 
 function currentUser(req) {

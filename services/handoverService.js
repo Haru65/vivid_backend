@@ -22,7 +22,7 @@ function normalizeRole(role) {
 
 function requireSalesUser(user) {
   const role = normalizeRole(user?.role);
-  if (!['admin', 'salesperson', 'sales_head', 'sales_engineer'].includes(role)) {
+  if (!['admin', 'salesperson', 'sales_head', 'sales_engineer', 'presales'].includes(role)) {
     throw appError('Only CRM sales users or admin can create and submit ERP handovers.', 403);
   }
 }
@@ -144,7 +144,7 @@ async function quotationBundle(client, quotationId, lock = false) {
 }
 
 function canAccessBundle(bundle, user) {
-  return !['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role))
+  return !['salesperson', 'sales_engineer', 'presales'].includes(normalizeRole(user?.role))
     || String(bundle.sales_owner_id || '') === String(user?.id || '')
     || (!bundle.sales_owner_id && bundle.assigned_to === user.name);
 }
@@ -453,7 +453,7 @@ async function listHandovers(user) {
   const role = normalizeRole(user?.role);
   const params = [];
   let where = '';
-  if (['salesperson', 'sales_engineer'].includes(role)) {
+  if (['salesperson', 'sales_engineer', 'presales'].includes(role)) {
     params.push(user?.id || null, actorName(user));
     where = `WHERE h.created_by_user_id = $1
       OR (h.created_by_user_id IS NULL AND h.created_by_name = $2)
@@ -472,7 +472,7 @@ async function getHandover(id, user) {
     || (!handover.created_by_user_id && handover.created_by_name === actorName(user));
   const ownsLead = String(handover.sales_owner_id || '') === String(user?.id || '')
     || (!handover.sales_owner_id && handover.sales_owner === actorName(user));
-  if (['salesperson', 'sales_engineer'].includes(normalizeRole(user?.role)) && !ownsHandover && !ownsLead) {
+  if (['salesperson', 'sales_engineer', 'presales'].includes(normalizeRole(user?.role)) && !ownsHandover && !ownsLead) {
     throw appError('You can view only your own handovers.', 403);
   }
   return handover;

@@ -132,7 +132,7 @@ function roleOf(user) {
 }
 
 function isIndividualSales(user) {
-  return ['salesperson', 'sales_engineer'].includes(roleOf(user));
+  return ['salesperson', 'sales_engineer', 'presales'].includes(roleOf(user));
 }
 
 function canAccessLead(lead, user) {
@@ -155,10 +155,10 @@ async function resolveSalesOwner(data, user, db = pool) {
      FROM users
      WHERE id = $1
        AND is_active = TRUE
-       AND role IN ('salesperson', 'sales_engineer')`,
+       AND role IN ('salesperson', 'sales_engineer', 'presales')`,
     [ownerId],
   );
-  if (!result.rows[0]) throw validationError('Select an active salesperson or sales engineer.');
+  if (!result.rows[0]) throw validationError('Select an active salesperson, sales engineer, or presales user.');
   return {
     id: Number(result.rows[0].id),
     name: [result.rows[0].first_name, result.rows[0].last_name].filter(Boolean).join(' '),

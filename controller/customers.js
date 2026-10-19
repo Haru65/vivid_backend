@@ -36,7 +36,7 @@ function actorName(user) {
 }
 
 function isIndividualSales(user) {
-  return ['salesperson', 'sales_engineer'].includes(String(user?.role || '').trim().toLowerCase());
+  return ['salesperson', 'sales_engineer', 'presales'].includes(String(user?.role || '').trim().toLowerCase());
 }
 
 function canAccessOwnedCustomer(customer, user) {
