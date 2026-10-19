@@ -504,8 +504,17 @@ async function createOrUpdateRequestQuotation(id, data, user) {
   }
 
   const payload = { ...data, lead_id: request.lead_id };
+  const startingSalesRevision = request.status === 'revision_requested_by_sales' && Boolean(request.quotation_id);
   let quotation;
-  if (request.quotation_id) {
+  if (startingSalesRevision) {
+    const revisionNotes = request.revision_notes || 'Client requested changes';
+    const revision = await createQuotationRevision(request.quotation_id, {
+      revision_reason: revisionNotes,
+      negotiation_notes: revisionNotes,
+    }, user);
+    quotation = await updateQuotation(revision.id, payload, user);
+    if (!quotation) throw appError('The new revision quotation could not be prepared.', 409);
+  } else if (request.quotation_id) {
     quotation = await updateQuotation(request.quotation_id, payload, user);
     if (!quotation) throw appError('Existing draft quotation is not editable.', 409);
   } else {
@@ -538,7 +547,9 @@ async function createOrUpdateRequestQuotation(id, data, user) {
   await pool.query('DELETE FROM estimation_quote_uploads WHERE estimation_request_id = $1', [id]);
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: selfAssigningHead
+    content: startingSalesRevision
+      ? `Revision quotation ${quotation.quotation_number} created by ${actorName(user)}`
+      : selfAssigningHead
       ? `Estimation self-assigned to ${actorName(user)} and quotation ${quotation.quotation_number} prepared`
       : `Estimation quotation ${quotation.quotation_number} prepared by ${actorName(user)}`,
   }, user);
@@ -723,40 +734,33 @@ function jsonObject(value, field) {
 async function requestSalesRevision(id, data, user) {
   requireSales(user);
   const request = await getRequest(id, user);
-  if (!['sent_to_client', 'returned_to_sales'].includes(request.status)) throw appError('Only sent or returned quotations can be sent back for revision.');
+  if (request.status !== 'sent_to_client') throw appError('Only a quotation already sent to the client can be returned for revision.');
   const notes = text(data.notes || data.revision_notes, 'Revision notes', 2000, true);
-  let revision = null;
-  if (request.status === 'sent_to_client' && request.quotation_id) {
-    revision = await createQuotationRevision(request.quotation_id, {
-      revision_reason: notes,
-      negotiation_notes: notes,
-    }, user);
-  }
   await pool.query(
     `UPDATE estimation_requests
      SET status = 'revision_requested_by_sales',
          revision_requested_by = 'sales',
          revision_notes = $1,
-         quotation_id = COALESCE($3, quotation_id),
+         review_notes = NULL,
+         head_approved_at = NULL,
+         returned_to_sales_at = NULL,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $2`,
-    [notes, id, revision?.id || null],
+    [notes, id],
   );
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: revision
-      ? `Sales requested revision ${revision.quotation_number}: ${notes}`
-      : `Sales requested estimation revision: ${notes}`,
+    content: `Sales requested quotation revision: ${notes}`,
   }, user);
   if (request.assigned_engineer_id) await notifyUserId(request.assigned_engineer_id, {
-    title: revision ? `Sales created ${revision.quotation_number}` : 'Sales requested quotation revision',
+    title: 'Client revision requested',
     body: notes,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,
   });
-  if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, {
-    title: revision ? `Revision ${revision.quotation_number} sent to estimation` : 'Sales sent quotation back for revision',
+  if (request.estimation_head_id && String(request.estimation_head_id) !== String(request.assigned_engineer_id || '')) await notifyUserId(request.estimation_head_id, {
+    title: 'Sales sent quotation back for revision',
     body: notes,
     category: 'estimation',
     link_type: 'estimation_request',
