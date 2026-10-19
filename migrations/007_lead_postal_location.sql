@@ -1,0 +1,5 @@
+ALTER TABLE leads
+  ADD COLUMN IF NOT EXISTS billing_state VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS billing_city VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS billing_pincode VARCHAR(6),
+  ADD COLUMN IF NOT EXISTS precise_location TEXT;

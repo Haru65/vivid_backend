@@ -16,6 +16,10 @@ const LEAD_COLUMNS = `
   customer_id,
   segment,
   site_location,
+  billing_state,
+  billing_city,
+  billing_pincode,
+  precise_location,
   consultant,
   enquiry_product,
   enquiry_notes,
@@ -45,6 +49,10 @@ const LEAD_TABLE_COLUMNS = `
   l.customer_id,
   l.segment,
   l.site_location,
+  l.billing_state,
+  l.billing_city,
+  l.billing_pincode,
+  l.precise_location,
   l.consultant,
   l.enquiry_product,
   l.enquiry_notes,
@@ -200,6 +208,13 @@ function phone(value, field, required = false) {
   return digits || null;
 }
 
+function pincode(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const digits = String(value).replace(/\D/g, '');
+  if (digits.length !== 6) throw validationError('Billing PIN code must be exactly 6 digits.');
+  return digits;
+}
+
 function email(value, field, required = false) {
   const result = text(value, field, 255, required);
   if (!result) return null;
@@ -323,6 +338,10 @@ function leadUpdateActivities(previous, next) {
     ['priority', 'priority'],
     ['segment', 'segment'],
     ['site_location', 'site location'],
+    ['billing_state', 'billing state'],
+    ['billing_city', 'billing city'],
+    ['billing_pincode', 'billing PIN code'],
+    ['precise_location', 'precise location'],
     ['consultant', 'consultant'],
     ['enquiry_product', 'enquiry product'],
     ['enquiry_notes', 'enquiry notes'],
@@ -371,6 +390,10 @@ function leadValues(leadData) {
     salesApprovalStatus,
     status === 'Lost' ? text(leadData.loss_reason, 'Loss reason', 255, true) : null,
     text(leadData.project_name, 'Project name', 255, true),
+    text(leadData.billing_state, 'Billing state', 255),
+    text(leadData.billing_city, 'Billing city', 255),
+    pincode(leadData.billing_pincode),
+    text(leadData.precise_location, 'Precise location', 2000),
   ];
 }
 
@@ -641,6 +664,9 @@ async function selectedCustomerForLead(client, customerId) {
        industry,
        segment,
        site_location,
+       city,
+       state,
+       billing_address,
        consultant,
        contact_person_name,
        contact_person_phone,
@@ -665,6 +691,9 @@ function leadDataForCustomer(leadData, customer) {
     industry_type: leadData.industry_type || customer.industry,
     segment: leadData.segment || customer.segment,
     site_location: leadData.site_location || customer.site_location,
+    billing_city: leadData.billing_city || customer.city,
+    billing_state: leadData.billing_state || customer.state,
+    precise_location: leadData.precise_location || customer.billing_address,
     consultant: leadData.consultant || customer.consultant,
   };
 }
@@ -712,8 +741,12 @@ async function createLead(leadData, user) {
         enquiry_state,
         sales_approval_status,
         loss_reason,
-        project_name
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+        project_name,
+        billing_state,
+        billing_city,
+        billing_pincode,
+        precise_location
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
       RETURNING ${LEAD_COLUMNS}`,
       insertValues,
     );
@@ -814,8 +847,12 @@ async function updateLead(id, leadData, user) {
          sales_approval_status = $23,
          loss_reason = $24,
          project_name = $25,
+         billing_state = $26,
+         billing_city = $27,
+         billing_pincode = $28,
+         precise_location = $29,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $26
+     WHERE id = $30
      RETURNING ${LEAD_COLUMNS}`,
       updateValues,
     );

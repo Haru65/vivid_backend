@@ -6,6 +6,7 @@ const test = require('node:test');
 const quotations = require('../controller/quotations');
 const { hashPassword, verifyPassword } = require('../controller/userManagement');
 const { validateAuthConfiguration } = require('../middleware/auth');
+const { normalizePostalResponse } = require('../services/postalService');
 
 test('quotation controller exposes every routed operation', () => {
   for (const operation of [
@@ -61,4 +62,24 @@ test('sales forwards revision notes while estimation creates the revision quotat
   assert.doesNotMatch(salesRevisionFlow, /createQuotationRevision\(/);
   assert.match(estimationSaveFlow, /request\.status === 'revision_requested_by_sales'/);
   assert.match(estimationSaveFlow, /createQuotationRevision\(request\.quotation_id/);
+});
+
+test('postal lookup maps district and state into lead location fields', () => {
+  const location = normalizePostalResponse({
+    success: true,
+    data: {
+      post_offices: [
+        { office_name: 'Vashi', district: 'Thane', state: 'Maharashtra' },
+        { office_name: 'Sanpada', district: 'Thane', state: 'Maharashtra' },
+      ],
+    },
+  }, '400703');
+
+  assert.deepEqual(location, {
+    pincode: '400703',
+    state: 'Maharashtra',
+    city: 'Thane',
+    district: 'Thane',
+    post_offices: ['Vashi', 'Sanpada'],
+  });
 });

@@ -14,6 +14,7 @@ const {
   acceptProposal,
 } = require('../controller/leads');
 const { optionalUser, requireRoles } = require('../middleware/auth');
+const { lookupPincode } = require('../services/postalService');
 
 const router = express.Router();
 router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson'));
@@ -34,6 +35,14 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('Error retrieving leads:', error);
     res.status(500).json({ error: 'Unable to retrieve leads' });
+  }
+});
+
+router.get('/postal/pincode/:pincode', async (req, res) => {
+  try {
+    res.json(await lookupPincode(req.params.pincode));
+  } catch (error) {
+    handleActivityError(res, 'Unable to look up PIN code', error);
   }
 });
 
