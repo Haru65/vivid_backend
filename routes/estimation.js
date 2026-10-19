@@ -7,6 +7,7 @@ const {
   createOrUpdateRequestQuotation,
   discardRequest,
   generatePoSheetPdf,
+  getUploadedRequestQuotationPdf,
   getPoSheet,
   getRequest,
   listEstimationRequests,
@@ -14,10 +15,12 @@ const {
   requestRevision,
   requestSalesRevision,
   savePoEstimation,
+  sendUploadedRequestQuotation,
   submitForReview,
   submitLeadToEstimation,
   upsertPoSheet,
   updateEnquiryState,
+  uploadRequestQuotationPdf,
 } = require('../services/estimationService');
 const { optionalUser, requireRoles } = require('../middleware/auth');
 
@@ -130,6 +133,42 @@ router.post('/:id/quotation', async (req, res) => {
     res.json(await createOrUpdateRequestQuotation(req.params.id, req.body, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to save estimation quotation', error);
+  }
+});
+
+router.post('/:id/quotation-pdf', express.raw({ type: ['application/pdf', 'application/octet-stream'], limit: '15mb' }), async (req, res) => {
+  try {
+    res.json(await uploadRequestQuotationPdf(req.params.id, req.body, {
+      filename: req.get('X-File-Name'),
+      quote_value: req.get('X-Quote-Value'),
+    }, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to upload estimation quotation PDF', error);
+  }
+});
+
+router.get('/:id/quotation-pdf', async (req, res) => {
+  try {
+    const uploaded = await getUploadedRequestQuotationPdf(req.params.id, currentUser(req));
+    const disposition = req.query.download === '1' ? 'attachment' : 'inline';
+    const asciiFilename = uploaded.filename.replace(/[^\x20-\x7E]/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${asciiFilename}"; filename*=UTF-8''${encodeURIComponent(uploaded.filename)}`);
+    res.setHeader('Content-Length', uploaded.file_size);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.send(uploaded.pdf_data);
+  } catch (error) {
+    handleError(res, 'Unable to retrieve estimation quotation PDF', error);
+  }
+});
+
+router.post('/:id/send-uploaded-quotation', async (req, res) => {
+  try {
+    res.json(await sendUploadedRequestQuotation(req.params.id, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to send uploaded quotation', error);
   }
 });
 

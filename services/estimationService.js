@@ -4,6 +4,7 @@ const { createQuotation, createQuotationRevision, updateQuotation } = require('.
 const { logLeadActivity } = require('../controller/leads');
 const { createNotification, notifyRole, notifyUserId } = require('./notificationService');
 const { getMasterSettings } = require('../controller/settings');
+const { sendEmail } = require('./emailService');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const HEAD_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
@@ -80,9 +81,17 @@ const SELECT_REQUEST = `
   l.sales_approval_status,
   q.quotation_number,
   q.status AS quotation_status,
-  q.total_amount AS quotation_total,
+  COALESCE(q.total_amount, equ.quote_value) AS quotation_total,
   q.technical_notes_data,
   q.created_at AS quotation_created_at,
+  equ.id AS uploaded_quote_id,
+  equ.filename AS uploaded_quote_filename,
+  equ.mime_type AS uploaded_quote_mime_type,
+  equ.file_size AS uploaded_quote_file_size,
+  equ.quote_value AS uploaded_quote_value,
+  equ.uploaded_by_user_id AS uploaded_quote_by_user_id,
+  equ.uploaded_by_name AS uploaded_quote_by_name,
+  equ.uploaded_at AS uploaded_quote_at,
   pcs.sales_data AS po_sales_data,
   pcs.estimation_data AS po_estimation_data,
   pcs.status AS po_sheet_status,
@@ -101,6 +110,7 @@ function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
     FROM estimation_requests er
     JOIN leads l ON l.id = er.lead_id
     LEFT JOIN quotations q ON q.id = er.quotation_id
+    LEFT JOIN estimation_quote_uploads equ ON equ.estimation_request_id = er.id
     LEFT JOIN po_closure_sheets pcs ON pcs.id = er.po_closure_sheet_id
     ${where}
     ${order}
@@ -313,6 +323,173 @@ async function assignRequest(id, data, user) {
   return getRequest(id, user);
 }
 
+function uploadedPdfFilename(value) {
+  let decoded = String(value || 'estimation-quotation.pdf');
+  try { decoded = decodeURIComponent(decoded); } catch {}
+  const filename = decoded
+    .replace(/[\\/\r\n\0"]/g, '_')
+    .replace(/[^\p{L}\p{N}._ ()-]/gu, '_')
+    .trim()
+    .slice(0, 255);
+  if (!filename || !filename.toLowerCase().endsWith('.pdf')) {
+    throw appError('Upload a PDF file with a .pdf extension.');
+  }
+  return filename;
+}
+
+function uploadedQuoteValue(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999.99) {
+    throw appError('Enter a valid quotation value greater than zero.');
+  }
+  return Math.round((amount + Number.EPSILON) * 100) / 100;
+}
+
+async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
+  requireEstimation(user);
+  const request = await getRequest(id, user);
+  const isEngineer = user.role === 'estimation_engineer';
+  if (isEngineer && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+    throw appError('Only the assigned estimation engineer can upload this quotation.', 403);
+  }
+  const allowedStatuses = new Set(['submitted', 'assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress']);
+  if (!allowedStatuses.has(request.status)) {
+    throw appError('This estimation request is not ready for a quotation upload.', 409);
+  }
+  if (isEngineer && request.status === 'submitted') {
+    throw appError('The Estimation Head must assign this enquiry before an engineer can upload a quotation.', 409);
+  }
+
+  const pdf = Buffer.isBuffer(pdfData) ? pdfData : Buffer.from(pdfData || '');
+  if (!pdf.length) throw appError('Select a PDF file to upload.');
+  if (pdf.length > 15 * 1024 * 1024) throw appError('The PDF must be 15 MB or smaller.', 413);
+  if (pdf.subarray(0, 5).toString('ascii') !== '%PDF-') throw appError('The selected file is not a valid PDF.');
+  const filename = uploadedPdfFilename(metadata.filename);
+  const quoteValue = uploadedQuoteValue(metadata.quote_value);
+  const isRevision = ['revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status);
+  const nextStatus = isEngineer
+    ? (isRevision ? 'revision_submitted_for_review' : 'submitted_for_review')
+    : (isRevision ? 'revision_in_progress' : 'in_progress');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO estimation_quote_uploads (
+         estimation_request_id, filename, mime_type, file_size, quote_value, pdf_data,
+         uploaded_by_user_id, uploaded_by_name, uploaded_at, updated_at
+       ) VALUES ($1, $2, 'application/pdf', $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT (estimation_request_id) DO UPDATE
+       SET filename = EXCLUDED.filename,
+           mime_type = EXCLUDED.mime_type,
+           file_size = EXCLUDED.file_size,
+           quote_value = EXCLUDED.quote_value,
+           pdf_data = EXCLUDED.pdf_data,
+           uploaded_by_user_id = EXCLUDED.uploaded_by_user_id,
+           uploaded_by_name = EXCLUDED.uploaded_by_name,
+           uploaded_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP`,
+      [id, filename, pdf.length, quoteValue, pdf, user?.id || null, actorName(user)],
+    );
+    await client.query(
+      `UPDATE estimation_requests
+       SET quotation_id = NULL,
+           assigned_engineer_id = CASE WHEN $2 THEN assigned_engineer_id ELSE $3 END,
+           assigned_engineer_name = CASE WHEN $2 THEN assigned_engineer_name ELSE $4 END,
+           estimation_head_id = CASE WHEN $2 THEN estimation_head_id ELSE COALESCE(estimation_head_id, $3) END,
+           estimation_head_name = CASE WHEN $2 THEN estimation_head_name ELSE COALESCE(estimation_head_name, $4) END,
+           assigned_at = COALESCE(assigned_at, CURRENT_TIMESTAMP),
+           engineer_started_at = COALESCE(engineer_started_at, CURRENT_TIMESTAMP),
+           engineer_submitted_at = CASE WHEN $2 THEN CURRENT_TIMESTAMP ELSE engineer_submitted_at END,
+           status = $5,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [id, isEngineer, user?.id || null, actorName(user), nextStatus],
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  await logLeadActivity(request.lead_id, {
+    activity_type: 'system',
+    content: `${actorName(user)} uploaded quotation PDF ${filename} with value ${quoteValue.toFixed(2)}${isEngineer ? ' for Estimation Head review' : ''}`,
+  }, user);
+  if (isEngineer) {
+    const notification = {
+      title: 'Quotation PDF ready for review',
+      body: `${actorName(user)} uploaded ${filename} for ${request.company_name || `lead #${request.lead_id}`}.`,
+      category: 'estimation',
+      link_type: 'estimation_request',
+      link_id: request.id,
+    };
+    if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, notification);
+    else await notifyRole('estimation_head', notification);
+  }
+  return getRequest(id, user);
+}
+
+async function getUploadedRequestQuotationPdf(id, user) {
+  await getRequest(id, user);
+  const result = await pool.query(
+    `SELECT filename, mime_type, file_size, quote_value, pdf_data
+     FROM estimation_quote_uploads
+     WHERE estimation_request_id = $1`,
+    [id],
+  );
+  if (!result.rows[0]) throw appError('No uploaded quotation PDF was found.', 404);
+  return result.rows[0];
+}
+
+function escapeEmailHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function sendUploadedRequestQuotation(id, user) {
+  requireSales(user);
+  const request = await getRequest(id, user);
+  if (request.status !== 'returned_to_sales') {
+    throw appError('Estimation must approve and return this quotation before it can be sent.', 409);
+  }
+  const uploaded = await getUploadedRequestQuotationPdf(id, user);
+  const recipient = request.contact_person_email;
+  if (!recipient) throw appError('Add a customer email address before sending this quotation.');
+
+  await sendEmail({
+    to: recipient,
+    subject: `Quotation - ${request.company_name || request.project_name || 'Vivid Electromech'}`,
+    html: `<p>Dear ${escapeEmailHtml(request.contact_person_name || 'Customer')},</p><p>Please find attached our quotation for ${escapeEmailHtml(request.project_name || request.company_name || 'your enquiry')}.</p><p>Regards,<br>${escapeEmailHtml(actorName(user) || 'Vivid Electromech')}</p>`,
+    attachments: [{ filename: uploaded.filename, content: uploaded.pdf_data }],
+  });
+  await pool.query(
+    `UPDATE estimation_requests
+     SET status = 'sent_to_client', sent_to_client_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1`,
+    [id],
+  );
+  await pool.query(
+    `UPDATE leads
+     SET quotation = $1,
+         lead_status = CASE WHEN lead_status IN ('Proposal Accepted', 'Lost') THEN lead_status ELSE 'Proposal Sent' END,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $2`,
+    [uploaded.filename, request.lead_id],
+  );
+  await logLeadActivity(request.lead_id, {
+    activity_type: 'system',
+    content: `Uploaded quotation ${uploaded.filename} emailed to ${recipient}`,
+  }, user);
+  return getRequest(id, user);
+}
+
 async function createOrUpdateRequestQuotation(id, data, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
@@ -358,6 +535,7 @@ async function createOrUpdateRequestQuotation(id, data, user) {
      WHERE id = $3`,
     [id, user?.id || null, quotation.id],
   );
+  await pool.query('DELETE FROM estimation_quote_uploads WHERE estimation_request_id = $1', [id]);
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
     content: selfAssigningHead
@@ -370,44 +548,65 @@ async function createOrUpdateRequestQuotation(id, data, user) {
 async function submitForReview(id, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
-  if (!request.quotation_id) throw appError('Create a quotation before submitting it to sales.');
-  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+  if (!request.quotation_id && !request.uploaded_quote_id) throw appError('Prepare or upload a quotation before submitting it.');
+  const isEngineer = user.role === 'estimation_engineer';
+  if (isEngineer && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can submit this request.', 403);
   }
   if (!['in_progress', 'revision_in_progress'].includes(request.status)) {
-    throw appError('Only estimation work in progress can be submitted to sales.', 409);
+    throw appError('Only estimation work in progress can be submitted.', 409);
   }
-  const masters = await getMasterSettings();
-  const requiredTechnicalFields = (masters.technical_note_fields || [])
-    .filter((field) => field.active !== false && field.required !== false);
-  const technicalValues = new Map((Array.isArray(request.technical_notes_data) ? request.technical_notes_data : [])
-    .map((item) => [String(item.code || '').toUpperCase(), String(item.value || '').trim()]));
-  const missingTechnicalFields = requiredTechnicalFields.filter((field) => !technicalValues.get(String(field.code).toUpperCase()));
-  if (missingTechnicalFields.length) {
-    throw appError(`Complete required technical notes before sending to sales: ${missingTechnicalFields.map((field) => field.label).join(', ')}.`, 409);
+  if (request.quotation_id) {
+    const masters = await getMasterSettings();
+    const requiredTechnicalFields = (masters.technical_note_fields || [])
+      .filter((field) => field.active !== false && field.required !== false);
+    const technicalValues = new Map((Array.isArray(request.technical_notes_data) ? request.technical_notes_data : [])
+      .map((item) => [String(item.code || '').toUpperCase(), String(item.value || '').trim()]));
+    const missingTechnicalFields = requiredTechnicalFields.filter((field) => !technicalValues.get(String(field.code).toUpperCase()));
+    if (missingTechnicalFields.length) {
+      throw appError(`Complete required technical notes before submitting: ${missingTechnicalFields.map((field) => field.label).join(', ')}.`, 409);
+    }
   }
+  const isRevision = request.status === 'revision_in_progress';
+  const nextStatus = isEngineer
+    ? (isRevision ? 'revision_submitted_for_review' : 'submitted_for_review')
+    : 'returned_to_sales';
   await pool.query(
     `UPDATE estimation_requests
-     SET status = 'returned_to_sales',
+     SET status = $2,
          engineer_submitted_at = CURRENT_TIMESTAMP,
-         returned_to_sales_at = CURRENT_TIMESTAMP,
+         returned_to_sales_at = CASE WHEN $3 THEN CURRENT_TIMESTAMP ELSE returned_to_sales_at END,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1`,
-    [id],
+    [id, nextStatus, !isEngineer],
   );
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Quotation ${request.quotation_number || ''} prepared by estimation and returned to ${request.requested_by_name || request.sales_owner_name || 'sales'}`,
+    content: isEngineer
+      ? `Quotation ${request.quotation_number || request.uploaded_quote_filename || ''} submitted to Estimation Head for review`
+      : `Quotation ${request.quotation_number || request.uploaded_quote_filename || ''} returned to ${request.requested_by_name || request.sales_owner_name || 'sales'}`,
   }, user);
-  const salesNotification = {
-    title: 'Quotation ready for sales',
-    body: `${actorName(user)} prepared quotation ${request.quotation_number || ''} for ${request.company_name || `lead #${request.lead_id}`}.`,
-    category: 'estimation',
-    link_type: 'estimation_request',
-    link_id: request.id,
-  };
-  if (request.requested_by_user_id) await notifyUserId(request.requested_by_user_id, salesNotification);
-  else await createNotification({ name: request.requested_by_name || request.sales_owner_name }, salesNotification);
+  if (isEngineer) {
+    const reviewNotification = {
+      title: 'Quotation ready for review',
+      body: `${actorName(user)} submitted ${request.quotation_number || request.uploaded_quote_filename || 'a quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+      category: 'estimation',
+      link_type: 'estimation_request',
+      link_id: request.id,
+    };
+    if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, reviewNotification);
+    else await notifyRole('estimation_head', reviewNotification);
+  } else {
+    const salesNotification = {
+      title: 'Quotation ready for sales',
+      body: `${actorName(user)} prepared ${request.quotation_number || request.uploaded_quote_filename || 'a quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+      category: 'estimation',
+      link_type: 'estimation_request',
+      link_id: request.id,
+    };
+    if (request.requested_by_user_id) await notifyUserId(request.requested_by_user_id, salesNotification);
+    else await createNotification({ name: request.requested_by_name || request.sales_owner_name }, salesNotification);
+  }
   return getRequest(id, user);
 }
 
@@ -444,7 +643,7 @@ async function requestRevision(id, data, user) {
 async function approveRequest(id, data, user) {
   requireEstimationHead(user);
   const request = await getRequest(id, user);
-  if (!request.quotation_id) throw appError('Quotation is required before approval.');
+  if (!request.quotation_id && !request.uploaded_quote_id) throw appError('Quotation is required before approval.');
   if (!['submitted_for_review', 'revision_submitted_for_review'].includes(request.status)) {
     throw appError('Only submitted estimation quotations can be approved.');
   }
@@ -461,30 +660,32 @@ async function approveRequest(id, data, user) {
      WHERE id = $4`,
     [notes, user?.id || null, actorName(user), id],
   );
-  await pool.query(
-    `UPDATE quotations
-     SET reviewed_by_user_id = $1,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $2`,
-    [user?.id || null, request.quotation_id],
-  );
+  if (request.quotation_id) {
+    await pool.query(
+      `UPDATE quotations
+       SET reviewed_by_user_id = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [user?.id || null, request.quotation_id],
+    );
+  }
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Estimation approved quotation ${request.quotation_number || ''} and returned it to sales`,
+    content: `Estimation approved quotation ${request.quotation_number || request.uploaded_quote_filename || ''} and returned it to sales`,
   }, user);
   if (request.sales_owner_id) await notifyUserId(request.sales_owner_id, {
     title: 'Quotation returned to sales',
-    body: `Estimation approved ${request.quotation_number || 'the quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
-    category: 'quotation',
-    link_type: 'quotation',
-    link_id: request.quotation_id,
+    body: `Estimation approved ${request.quotation_number || request.uploaded_quote_filename || 'the quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+    category: 'estimation',
+    link_type: 'estimation_request',
+    link_id: request.id,
   });
   else await createNotification({ name: request.sales_owner_name || request.requested_by_name }, {
     title: 'Quotation returned to sales',
-    body: `Estimation approved ${request.quotation_number || 'the quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
-    category: 'quotation',
-    link_type: 'quotation',
-    link_id: request.quotation_id,
+    body: `Estimation approved ${request.quotation_number || request.uploaded_quote_filename || 'the quotation'} for ${request.company_name || `lead #${request.lead_id}`}.`,
+    category: 'estimation',
+    link_type: 'estimation_request',
+    link_id: request.id,
   });
   return getRequest(id, user);
 }
@@ -629,7 +830,7 @@ async function upsertPoSheet(id, user, salesData = {}) {
   if (!['sent_to_client', 'client_approved'].includes(request.status)) {
     throw appError('PO can be generated only after the quotation is sent to the client.');
   }
-  if (!request.quotation_id) throw appError('Quotation is required before PO generation.');
+  if (!request.quotation_id && !request.uploaded_quote_id) throw appError('Quotation is required before PO generation.');
   const data = jsonObject(salesData, 'PO sales data');
   const poNumber = text(data.po_number || data.po_ref || autoPoNumber(request), 'PO number', 100, true);
   data.po_number = poNumber;
@@ -654,16 +855,18 @@ async function upsertPoSheet(id, user, salesData = {}) {
       [id, request.lead_id, request.quotation_id, request.customer_id, JSON.stringify(data), user?.id || null, actorName(user)],
     );
     sheet = result.rows[0];
-    await client.query(
-      `UPDATE quotations
-       SET customer_po_number = COALESCE($1, customer_po_number),
-           customer_po_date = COALESCE($2::date, customer_po_date),
-           status = 'Approved',
-           order_confirmed_at = COALESCE(order_confirmed_at, CURRENT_TIMESTAMP),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $3`,
-      [poNumber, data.po_date || null, request.quotation_id],
-    );
+    if (request.quotation_id) {
+      await client.query(
+        `UPDATE quotations
+         SET customer_po_number = COALESCE($1, customer_po_number),
+             customer_po_date = COALESCE($2::date, customer_po_date),
+             status = 'Approved',
+             order_confirmed_at = COALESCE(order_confirmed_at, CURRENT_TIMESTAMP),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $3`,
+        [poNumber, data.po_date || null, request.quotation_id],
+      );
+    }
     await client.query(
       `UPDATE estimation_requests
        SET status = 'po_submitted_to_estimation',
@@ -1039,11 +1242,14 @@ module.exports = {
   approveRequest,
   assignRequest,
   createOrUpdateRequestQuotation,
+  getUploadedRequestQuotationPdf,
   getRequest,
   listEstimationRequests,
   markQuotationSent,
   requestRevision,
+  sendUploadedRequestQuotation,
   submitForReview,
   submitLeadToEstimation,
   updateEnquiryState,
+  uploadRequestQuotationPdf,
 };

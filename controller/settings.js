@@ -17,6 +17,7 @@ const DEFAULT_MASTER_SETTINGS = {
   erp_workflow_stage_owners: ['GA Approval - Design', 'Cost Approval - Estimation', 'Work Order Approval - Management', 'Purchase - Purchase', 'Production - Production', 'Quality & Testing - QA/QC', 'Dispatch & Delivery - Dispatch'],
   loss_reasons: ['Price high', 'Competitor selected', 'Project delayed', 'No response', 'Technical mismatch', 'Budget not approved'],
   email_templates: ['Quotation email', 'Approval request email', 'Follow-up email', 'Handover notification'],
+  quotation_numbering: { prefix: 'QT', separator: '-', padding: 5 },
   quotation_price_points: [],
   technical_note_fields: [
     { code: 'IP_RATING', section: 'General', label: 'Degree of protection', pdf_label: 'IP Rating / Degree of Protection', input_type: 'select', options: ['IP42', 'IP52', 'IP54', 'IP55', 'IP65'], default_value: 'IP54', required: true, active: true, display_order: 10 },
@@ -117,8 +118,20 @@ function normalizeTechnicalNoteFields(value, fallback = []) {
   }).filter(Boolean).sort((left, right) => left.display_order - right.display_order);
 }
 
+function normalizeQuotationNumbering(value = {}) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const prefix = cleanText(source.prefix || 'QT', 20).replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'QT';
+  const separator = ['', '-', '/'].includes(source.separator) ? source.separator : '-';
+  const requestedPadding = Number(source.padding);
+  const padding = Number.isInteger(requestedPadding) && requestedPadding >= 1 && requestedPadding <= 10
+    ? requestedPadding
+    : 5;
+  return { prefix, separator, padding };
+}
+
 function normalizeMasterSettings(data = {}) {
   return Object.fromEntries(Object.entries(DEFAULT_MASTER_SETTINGS).map(([key, fallback]) => {
+    if (key === 'quotation_numbering') return [key, normalizeQuotationNumbering(data[key])];
     if (key === 'quotation_price_points') return [key, normalizePricePoints(data[key], fallback)];
     if (key === 'technical_note_fields') return [key, normalizeTechnicalNoteFields(data[key], fallback)];
     return [key, normalizeMasterList(data[key], fallback)];

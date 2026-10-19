@@ -2,6 +2,7 @@ const pool = require('../config/db_connection');
 const { logLeadActivity } = require('./leads');
 const { sendEmail } = require('../services/emailService');
 const { generateQuotationPdf } = require('../services/quotationGeneration');
+const { getMasterSettings } = require('./settings');
 
 const GLOBAL_VIEW_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
 const PREPARATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer']);
@@ -366,8 +367,13 @@ async function generateQuotationDocument(id, user) {
 }
 
 async function generateQuotationNumber(db) {
+  const masters = await getMasterSettings();
+  const numbering = masters.quotation_numbering || {};
+  const prefix = String(numbering.prefix || 'QT');
+  const separator = ['', '-', '/'].includes(numbering.separator) ? numbering.separator : '-';
+  const padding = Number.isInteger(Number(numbering.padding)) ? Number(numbering.padding) : 5;
   const sequence = await db.query(`SELECT nextval('quotation_number_seq') AS number`);
-  return `QT-${String(sequence.rows[0].number).padStart(5, '0')}`;
+  return `${prefix}${separator}${String(sequence.rows[0].number).padStart(padding, '0')}`;
 }
 
 async function createQuotation(data, user) {
