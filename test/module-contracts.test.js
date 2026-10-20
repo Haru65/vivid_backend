@@ -6,7 +6,7 @@ const test = require('node:test');
 const quotations = require('../controller/quotations');
 const { hashPassword, USER_ROLES, verifyPassword } = require('../controller/userManagement');
 const { validateAuthConfiguration } = require('../middleware/auth');
-const { normalizePostalResponse } = require('../services/postalService');
+const { normalizePostalResponse, listDistrictsForState, listCitiesForDistrict } = require('../services/postalService');
 
 test('quotation controller exposes every routed operation', () => {
   for (const operation of [
@@ -120,4 +120,18 @@ test('postal lookup keeps district separate and returns selectable towns', () =>
     district: 'Thane',
     post_offices: ['Vashi', 'Sanpada'],
   });
+});
+
+test('postal directory returns every Maharashtra district and all towns in a selected district', async () => {
+  const state = await listDistrictsForState('Maharashtra');
+  assert.equal(state.districts.length, 36);
+  assert.ok(state.districts.includes('Pune'));
+  assert.ok(state.districts.includes('Yavatmal'));
+
+  const district = await listCitiesForDistrict('Maharashtra', 'Pune');
+  assert.ok(district.cities.length > 700);
+  assert.ok(district.cities.includes('Pune'));
+
+  const unionTerritory = await listDistrictsForState('Dadra and Nagar Haveli and Daman and Diu');
+  assert.ok(unionTerritory.districts.length > 0);
 });
