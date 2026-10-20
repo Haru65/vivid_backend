@@ -14,7 +14,7 @@ const {
   acceptProposal,
 } = require('../controller/leads');
 const { optionalUser, requireRoles } = require('../middleware/auth');
-const { lookupPincode } = require('../services/postalService');
+const { lookupPincode, listDistrictsForState, listCitiesForDistrict } = require('../services/postalService');
 
 const router = express.Router();
 router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales'));
@@ -43,6 +43,22 @@ router.get('/postal/pincode/:pincode', async (req, res) => {
     res.json(await lookupPincode(req.params.pincode));
   } catch (error) {
     handleActivityError(res, 'Unable to look up PIN code', error);
+  }
+});
+
+router.get('/postal/states/:state/districts', async (req, res) => {
+  try {
+    res.json(await listDistrictsForState(req.params.state));
+  } catch (error) {
+    handleActivityError(res, 'Unable to retrieve districts', error);
+  }
+});
+
+router.get('/postal/states/:state/districts/:district/cities', async (req, res) => {
+  try {
+    res.json(await listCitiesForDistrict(req.params.state, req.params.district));
+  } catch (error) {
+    handleActivityError(res, 'Unable to retrieve cities', error);
   }
 });
 
