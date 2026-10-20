@@ -17,6 +17,7 @@ const LEAD_COLUMNS = `
   segment,
   site_location,
   billing_state,
+  billing_district,
   billing_city,
   billing_pincode,
   precise_location,
@@ -50,6 +51,7 @@ const LEAD_TABLE_COLUMNS = `
   l.segment,
   l.site_location,
   l.billing_state,
+  l.billing_district,
   l.billing_city,
   l.billing_pincode,
   l.precise_location,
@@ -132,7 +134,7 @@ function roleOf(user) {
 }
 
 function isIndividualSales(user) {
-  return ['salesperson', 'sales_engineer', 'presales'].includes(roleOf(user));
+  return ['salesperson', 'sales_engineer'].includes(roleOf(user));
 }
 
 function canAccessLead(lead, user) {
@@ -145,7 +147,7 @@ async function resolveSalesOwner(data, user, db = pool) {
   if (isIndividualSales(user)) {
     return { id: Number(user.id), name: actorName(user) };
   }
-  if (!['admin', 'sales_head'].includes(roleOf(user))) {
+  if (!['admin', 'sales_head', 'presales'].includes(roleOf(user))) {
     throw Object.assign(new Error('Only Sales Head or Admin can assign leads.'), { statusCode: 403 });
   }
   const ownerId = Number(data.sales_owner_id);
@@ -339,6 +341,7 @@ function leadUpdateActivities(previous, next) {
     ['segment', 'segment'],
     ['site_location', 'site location'],
     ['billing_state', 'billing state'],
+    ['billing_district', 'billing district'],
     ['billing_city', 'billing city'],
     ['billing_pincode', 'billing PIN code'],
     ['precise_location', 'precise location'],
@@ -391,6 +394,7 @@ function leadValues(leadData) {
     status === 'Lost' ? text(leadData.loss_reason, 'Loss reason', 255, true) : null,
     text(leadData.project_name, 'Project name', 255, true),
     text(leadData.billing_state, 'Billing state', 255),
+    text(leadData.billing_district, 'Billing district', 255),
     text(leadData.billing_city, 'Billing city', 255),
     pincode(leadData.billing_pincode),
     text(leadData.precise_location, 'Precise location', 2000),
@@ -743,10 +747,11 @@ async function createLead(leadData, user) {
         loss_reason,
         project_name,
         billing_state,
+        billing_district,
         billing_city,
         billing_pincode,
         precise_location
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
       RETURNING ${LEAD_COLUMNS}`,
       insertValues,
     );
@@ -848,11 +853,12 @@ async function updateLead(id, leadData, user) {
          loss_reason = $24,
          project_name = $25,
          billing_state = $26,
-         billing_city = $27,
-         billing_pincode = $28,
-         precise_location = $29,
+         billing_district = $27,
+         billing_city = $28,
+         billing_pincode = $29,
+         precise_location = $30,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $30
+     WHERE id = $31
      RETURNING ${LEAD_COLUMNS}`,
       updateValues,
     );

@@ -76,10 +76,24 @@ test('sales forwards revision notes while estimation creates the revision quotat
   assert.match(estimationSaveFlow, /createQuotationRevision\(request\.quotation_id/);
 });
 
+test('quotation revisions update the existing quotation and preserve its number', () => {
+  const quotationSource = fs.readFileSync(path.join(__dirname, '../controller/quotations.js'), 'utf8');
+  const revisionFlow = quotationSource.slice(
+    quotationSource.indexOf('async function createQuotationRevision'),
+    quotationSource.indexOf('async function deleteQuotation'),
+  );
+
+  assert.match(revisionFlow, /UPDATE quotations/);
+  assert.match(revisionFlow, /revision_number = \$1/);
+  assert.match(revisionFlow, /WHERE id = \$5/);
+  assert.doesNotMatch(revisionFlow, /INSERT INTO quotations/);
+  assert.doesNotMatch(revisionFlow, /quotationNumber.*-R/);
+});
+
 test('uploaded PDFs receive quotation numbers instead of using their filenames', () => {
   const serviceSource = fs.readFileSync(path.join(__dirname, '../services/estimationService.js'), 'utf8');
 
-  assert.match(serviceSource, /COALESCE\(q\.quotation_number, equ\.quotation_number\) AS quotation_number/);
+  assert.match(serviceSource, /REGEXP_REPLACE\(COALESCE\(q\.quotation_number, equ\.quotation_number\).+AS quotation_number/);
   assert.match(serviceSource, /nextval\('quotation_number_seq'\)/);
   assert.match(serviceSource, /estimation_request_id, quotation_number, revision_number, filename/);
   assert.match(serviceSource, /\[uploaded\.quotation_number, request\.lead_id\]/);
@@ -88,7 +102,7 @@ test('uploaded PDFs receive quotation numbers instead of using their filenames',
   assert.match(serviceSource, /REPLACE\(activity\.content, upload\.filename, upload\.quotation_number\)/);
 });
 
-test('postal lookup maps district and state into lead location fields', () => {
+test('postal lookup keeps district separate and returns selectable towns', () => {
   const location = normalizePostalResponse({
     success: true,
     data: {
@@ -102,7 +116,7 @@ test('postal lookup maps district and state into lead location fields', () => {
   assert.deepEqual(location, {
     pincode: '400703',
     state: 'Maharashtra',
-    city: 'Thane',
+    city: 'Vashi',
     district: 'Thane',
     post_offices: ['Vashi', 'Sanpada'],
   });

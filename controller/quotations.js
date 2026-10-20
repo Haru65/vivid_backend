@@ -4,9 +4,10 @@ const { sendEmail } = require('../services/emailService');
 const { generateQuotationPdf } = require('../services/quotationGeneration');
 const { getMasterSettings } = require('./settings');
 
-const GLOBAL_VIEW_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
+const GLOBAL_VIEW_ROLES = new Set(['admin', 'sales_head', 'estimation_head', 'presales']);
 const PREPARATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer', 'presales']);
 const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales']);
+const GENERATED_QUOTATION_EDITOR_ENABLED = false;
 
 function appError(message, statusCode = 400) {
   const error = new Error(message);
@@ -16,6 +17,12 @@ function appError(message, statusCode = 400) {
 
 function validationError(message) {
   return appError(message, 400);
+}
+
+function requireGeneratedQuotationEditor() {
+  if (!GENERATED_QUOTATION_EDITOR_ENABLED) {
+    throw appError('Generated quotation preparation is temporarily disabled. Upload a quotation PDF instead.', 409);
+  }
 }
 
 function roleOf(user) {
@@ -35,18 +42,12 @@ function sameName(left, right) {
 }
 
 function isIndividualSales(user) {
-  return ['salesperson', 'sales_engineer', 'presales'].includes(roleOf(user));
+  return ['salesperson', 'sales_engineer'].includes(roleOf(user));
 }
 
 function canViewQuotation(quotation, user) {
   const role = roleOf(user);
   if (GLOBAL_VIEW_ROLES.has(role)) return true;
-  if (role === 'presales') {
-    return sameId(quotation.sales_owner_id, user?.id)
-      || sameName(quotation.assigned_to, actorName(user))
-      || sameId(quotation.prepared_by_user_id, user?.id)
-      || sameId(quotation.assigned_engineer_id, user?.id);
-  }
   if (isIndividualSales(user)) {
     return sameId(quotation.sales_owner_id, user?.id) || sameName(quotation.assigned_to, actorName(user));
   }
@@ -59,20 +60,21 @@ function canViewQuotation(quotation, user) {
 
 function canManageQuotation(quotation, user) {
   const role = roleOf(user);
-  if (['admin', 'estimation_head'].includes(role)) return true;
+  if (['admin', 'estimation_head', 'presales'].includes(role)) return true;
   return ['estimation_engineer', 'presales'].includes(role)
     && (sameId(quotation.prepared_by_user_id, user?.id) || sameId(quotation.assigned_engineer_id, user?.id));
 }
 
 function canSendQuotationToClient(quotation, user) {
   if (!SALES_ROLES.has(roleOf(user))) return false;
-  if (['admin', 'sales_head'].includes(roleOf(user))) return true;
+  if (['admin', 'sales_head', 'presales'].includes(roleOf(user))) return true;
   return sameId(quotation.sales_owner_id, user?.id) || sameName(quotation.assigned_to, actorName(user));
 }
 
 function quotationSelect(whereClause = '', orderClause = '') {
   return `
     SELECT q.*,
+      REGEXP_REPLACE(q.quotation_number, '-R[0-9]+$', '', 'i') AS quotation_number,
       l.assigned_to,
       NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
       er.assigned_engineer_id,
@@ -123,6 +125,7 @@ function quotationSelect(whereClause = '', orderClause = '') {
 async function quotationForAccess(db, id, user, { lock = false, permission = 'view' } = {}) {
   const result = await db.query(
     `SELECT q.*,
+       REGEXP_REPLACE(q.quotation_number, '-R[0-9]+$', '', 'i') AS quotation_number,
        l.assigned_to,
        NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
        er.assigned_engineer_id,
@@ -334,7 +337,7 @@ async function leadForPreparation(db, leadId, user) {
   if (!lead) throw appError('Lead not found.', 404);
   const role = roleOf(user);
   if (!PREPARATION_ROLES.has(role)) throw appError('Only estimation users or admin can prepare quotations.', 403);
-  if (['estimation_engineer', 'presales'].includes(role) && !sameId(lead.assigned_engineer_id, user?.id)) {
+  if (role === 'estimation_engineer' && !sameId(lead.assigned_engineer_id, user?.id)) {
     throw appError('Only the assigned estimation engineer can prepare this quotation.', 403);
   }
   return lead;
@@ -344,16 +347,7 @@ async function retrieveQuotations(user) {
   const role = roleOf(user);
   let where = '';
   let params = [];
-  if (role === 'presales') {
-    params = [user?.id || null, actorName(user)];
-    where = `WHERE EXISTS (
-      SELECT 1 FROM leads l
-      WHERE l.id = q.lead_id
-        AND (NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1 OR LOWER(TRIM(l.assigned_to)) = LOWER(TRIM($2)))
-    )
-    OR q.prepared_by_user_id = $1
-    OR EXISTS (SELECT 1 FROM estimation_requests er WHERE er.id = q.estimation_request_id AND er.assigned_engineer_id = $1)`;
-  } else if (isIndividualSales(user)) {
+  if (isIndividualSales(user)) {
     params = [user?.id || null, actorName(user)];
     where = `WHERE EXISTS (
       SELECT 1 FROM leads l
@@ -367,7 +361,10 @@ async function retrieveQuotations(user) {
   } else if (!GLOBAL_VIEW_ROLES.has(role)) {
     throw appError('You do not have permission to view quotations.', 403);
   }
-  const result = await pool.query(quotationSelect(where, 'ORDER BY q.created_at DESC, q.id DESC'), params);
+  const currentRevisionWhere = where
+    ? `WHERE (${where.replace(/^WHERE\s+/i, '')}) AND q.is_current_revision IS NOT FALSE`
+    : 'WHERE q.is_current_revision IS NOT FALSE';
+  const result = await pool.query(quotationSelect(currentRevisionWhere, 'ORDER BY q.created_at DESC, q.id DESC'), params);
   return result.rows;
 }
 
@@ -392,6 +389,7 @@ async function generateQuotationNumber(db) {
 }
 
 async function createQuotation(data, user) {
+  requireGeneratedQuotationEditor();
   const values = normalizedValues(data);
   const lead = await leadForPreparation(pool, values.leadId, user);
   const quotationNumber = await generateQuotationNumber(pool);
@@ -442,6 +440,7 @@ async function createQuotation(data, user) {
 }
 
 async function updateQuotation(id, data, user) {
+  requireGeneratedQuotationEditor();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -523,6 +522,7 @@ async function updateQuotation(id, data, user) {
 }
 
 async function createQuotationRevision(id, data, user) {
+  requireGeneratedQuotationEditor();
   const client = await pool.connect();
   let revisionId;
   try {
@@ -533,60 +533,35 @@ async function createQuotationRevision(id, data, user) {
     }
     if (quotation.is_current_revision === false) throw appError('Create a revision from the current quotation.', 409);
 
-    const groupId = quotation.revision_group_id || quotation.id;
-    await client.query('SELECT pg_advisory_xact_lock($1)', [Number(groupId)]);
-    const nextRevisionResult = await client.query(
-      `SELECT COALESCE(MAX(revision_number), 0) + 1 AS revision_number
-       FROM quotations
-       WHERE revision_group_id = $1 OR id = $1`,
-      [groupId],
-    );
-    const revisionNumber = Number(nextRevisionResult.rows[0].revision_number);
-    const rootNumber = String(quotation.quotation_number).replace(/-R\d+$/i, '');
-    const quotationNumber = `${rootNumber}-R${revisionNumber}`;
-    const reason = nullableString(data?.revision_reason, 'Revision reason', 5000)
-      || nullableString(data?.negotiation_notes, 'Negotiation notes', 5000)
-      || 'Customer requested a revision';
+    await client.query('SELECT pg_advisory_xact_lock($1)', [Number(quotation.id)]);
+    const revisionNumber = Number(quotation.revision_number || 0) + 1;
+    const reason = requiredString(data?.revision_reason, 'Revision reason', 5000);
+    const negotiationNotes = nullableString(data?.negotiation_notes, 'Negotiation notes', 5000);
 
-    await client.query(
+    const updated = await client.query(
       `UPDATE quotations
-       SET is_current_revision = FALSE,
-           status = CASE WHEN status IN ('Sent', 'Approved') THEN 'Superseded' ELSE status END,
+       SET status = 'Draft',
+           revision_group_id = id,
+           revision_number = $1,
+           parent_quotation_id = NULL,
+           is_current_revision = TRUE,
+           revision_reason = $2,
+           negotiation_notes = $3,
+           revision_type = 'customer_revision',
+           customer_request = $2,
+           prepared_by_user_id = $4,
+           sent_at = NULL,
+           sent_by_user_id = NULL,
            updated_at = CURRENT_TIMESTAMP
-       WHERE revision_group_id = $1 OR id = $1`,
-      [groupId],
+       WHERE id = $5
+       RETURNING id`,
+      [revisionNumber, reason, negotiationNotes, user?.id || null, quotation.id],
     );
-
-    const inserted = await client.query(
-      `INSERT INTO quotations (
-        quotation_number, lead_id, company_name, contact_person_name, contact_person_email,
-        contact_person_phone, billing_name, billing_address, billing_city, billing_state,
-        billing_pincode, billing_gstin, billing_email, billing_phone, line_items, subtotal,
-        gst_rate, gst_amount, total_amount, discount_percent, discount_amount, final_price,
-        payment_terms, delivery_days, warranty_terms, valid_until, status, notes,
-        revision_group_id, revision_number, parent_quotation_id, is_current_revision,
-        revision_reason, negotiation_notes, estimation_request_id, boq_data, costing_data,
-        total_internal_cost, selling_price, margin_percent, revision_type, customer_request,
-        sales_notes, technical_notes_data, prepared_by_user_id
-      )
-      SELECT $1, lead_id, company_name, contact_person_name, contact_person_email,
-        contact_person_phone, billing_name, billing_address, billing_city, billing_state,
-        billing_pincode, billing_gstin, billing_email, billing_phone, line_items, subtotal,
-        gst_rate, gst_amount, total_amount, discount_percent, discount_amount, final_price,
-        payment_terms, delivery_days, warranty_terms, valid_until, 'Draft', notes,
-        $2, $3, id, TRUE, $4, $5, estimation_request_id, boq_data, costing_data,
-        total_internal_cost, selling_price, margin_percent, 'customer_revision', $4,
-        sales_notes, technical_notes_data, $6
-      FROM quotations
-      WHERE id = $7
-      RETURNING id`,
-      [quotationNumber, groupId, revisionNumber, reason, reason, user?.id || null, quotation.id],
-    );
-    revisionId = inserted.rows[0].id;
+    revisionId = updated.rows[0].id;
     await logLeadActivity(quotation.lead_id, {
       activity_type: 'system',
-      content: `Quotation revision ${quotationNumber} created: ${reason}`,
-      metadata: { quotation_id: revisionId, parent_quotation_id: quotation.id, revision_number: revisionNumber },
+      content: `Quotation ${quotation.quotation_number} updated to R${revisionNumber}: ${reason}`,
+      metadata: { quotation_id: revisionId, revision_number: revisionNumber },
     }, user, client);
     await client.query('COMMIT');
   } catch (error) {

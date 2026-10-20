@@ -221,22 +221,10 @@ function customerValues(customerData) {
 
 async function retrieveCustomers(user) {
   await refreshAmcStatuses();
-  const individual = isIndividualSales(user);
-  const params = individual ? [user?.id || null, actorName(user)] : [];
-  const where = individual
-    ? `WHERE c.created_by_user_id = $1
-       OR EXISTS (
-         SELECT 1 FROM leads l
-         WHERE l.customer_id = c.id
-           AND (NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1 OR LOWER(TRIM(l.assigned_to)) = LOWER(TRIM($2)))
-       )`
-    : '';
   const result = await pool.query(
     `SELECT ${CUSTOMER_COLUMNS}
      FROM customers c
-     ${where}
      ORDER BY c.created_at DESC, c.id DESC`,
-    params,
   );
   return result.rows;
 }
@@ -396,7 +384,8 @@ async function createCustomer(customerData, user) {
 }
 
 async function updateCustomer(id, customerData, user) {
-  if (!await customerForAccess(id, user)) return null;
+  const existing = await pool.query('SELECT id FROM customers WHERE id = $1', [id]);
+  if (!existing.rows[0]) return null;
   const values = customerValues(customerData);
   const client = await pool.connect();
   try {

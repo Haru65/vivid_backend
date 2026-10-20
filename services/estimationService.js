@@ -11,7 +11,7 @@ const HEAD_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
 const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales']);
 const ESTIMATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer', 'presales']);
 const ESTIMATION_CONTRIBUTOR_ROLES = new Set(['estimation_engineer', 'presales']);
-const INDIVIDUAL_SALES_ROLES = new Set(['sales_engineer', 'salesperson', 'presales']);
+const INDIVIDUAL_SALES_ROLES = new Set(['sales_engineer', 'salesperson']);
 let uploadedQuotationBackfillComplete = false;
 
 function appError(message, statusCode = 400) {
@@ -86,7 +86,7 @@ const SELECT_REQUEST = `
   l.lead_status,
   l.enquiry_state,
   l.sales_approval_status,
-  COALESCE(q.quotation_number, equ.quotation_number) AS quotation_number,
+  REGEXP_REPLACE(COALESCE(q.quotation_number, equ.quotation_number), '-R[0-9]+$', '', 'i') AS quotation_number,
   q.status AS quotation_status,
   COALESCE(q.total_amount, equ.quote_value) AS quotation_total,
   q.technical_notes_data,
@@ -127,14 +127,13 @@ function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
 }
 
 function canViewRequest(user, request) {
-  if (['admin', 'estimation_head', 'sales_head'].includes(user?.role)) return true;
+  if (['admin', 'estimation_head', 'sales_head', 'presales'].includes(user?.role)) return true;
   const assignedEstimator = ESTIMATION_CONTRIBUTOR_ROLES.has(user?.role)
     && String(request.assigned_engineer_id || '') === String(user.id || '');
   const ownsSalesRequest = INDIVIDUAL_SALES_ROLES.has(user?.role)
     && (request.sales_owner_name === user.name
       || request.requested_by_name === user.name
       || String(request.sales_owner_id || '') === String(user.id || ''));
-  if (user?.role === 'presales') return assignedEstimator || ownsSalesRequest;
   if (user?.role === 'estimation_engineer') return assignedEstimator;
   if (INDIVIDUAL_SALES_ROLES.has(user?.role)) {
     return ownsSalesRequest;
@@ -153,12 +152,8 @@ async function getRequest(id, user, client = pool) {
 async function listEstimationRequests(user) {
   await backfillUploadedQuotationNumbers();
   let result;
-  if (['admin', 'sales_head', 'estimation_head'].includes(user?.role)) {
+  if (['admin', 'sales_head', 'estimation_head', 'presales'].includes(user?.role)) {
     result = await pool.query(requestQuery());
-  } else if (user?.role === 'presales') {
-    result = await pool.query(requestQuery(
-      'WHERE er.assigned_engineer_id = $1 OR er.requested_by_user_id = $1 OR er.sales_owner_id = $1 OR er.requested_by_name = $2 OR er.sales_owner_name = $2',
-    ), [user.id, actorName(user)]);
   } else if (user?.role === 'estimation_engineer') {
     result = await pool.query(requestQuery('WHERE er.assigned_engineer_id = $1'), [user.id]);
   } else {
@@ -359,7 +354,7 @@ function uploadedPdfFilename(value) {
 }
 
 function uploadedQuoteValue(value) {
-  const amount = Number(value);
+  const amount = Number(String(value ?? '').replace(/,/g, '').trim());
   if (!Number.isFinite(amount) || amount <= 0 || amount > 999999999999.99) {
     throw appError('Enter a valid quotation value greater than zero.');
   }
@@ -432,7 +427,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   requireEstimation(user);
   const request = await getRequest(id, user);
   const isEngineer = ESTIMATION_CONTRIBUTOR_ROLES.has(user.role);
-  if (isEngineer && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can upload this quotation.', 403);
   }
   const allowedStatuses = new Set(['submitted', 'assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress']);
@@ -472,7 +467,6 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
     let revisionNumber = Number(existingUpload.rows[0]?.revision_number || 0);
     if (isSalesRevision) {
       revisionNumber += 1;
-      quotationNumber = `${String(quotationNumber).replace(/-R\d+$/i, '')}-R${revisionNumber}`;
     }
     uploadedQuotationNumber = quotationNumber;
     await client.query(
@@ -600,7 +594,7 @@ async function createOrUpdateRequestQuotation(id, data, user) {
   const selfAssigningHead = request.status === 'submitted'
     && !request.assigned_engineer_id
     && isEstimationHead(user);
-  if (ESTIMATION_CONTRIBUTOR_ROLES.has(user.role) && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can prepare this quotation.', 403);
   }
   if (!selfAssigningHead && !['assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status)) {
@@ -611,10 +605,9 @@ async function createOrUpdateRequestQuotation(id, data, user) {
   const startingSalesRevision = request.status === 'revision_requested_by_sales' && Boolean(request.quotation_id);
   let quotation;
   if (startingSalesRevision) {
-    const revisionNotes = request.revision_notes || 'Client requested changes';
+    const revisionNotes = request.revision_notes;
     const revision = await createQuotationRevision(request.quotation_id, {
       revision_reason: revisionNotes,
-      negotiation_notes: revisionNotes,
     }, user);
     quotation = await updateQuotation(revision.id, payload, user);
     if (!quotation) throw appError('The new revision quotation could not be prepared.', 409);
@@ -665,7 +658,7 @@ async function submitForReview(id, user) {
   const request = await getRequest(id, user);
   if (!request.quotation_id && !request.uploaded_quote_id) throw appError('Prepare or upload a quotation before submitting it.');
   const isEngineer = ESTIMATION_CONTRIBUTOR_ROLES.has(user.role);
-  if (isEngineer && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can submit this request.', 403);
   }
   if (!['in_progress', 'revision_in_progress'].includes(request.status)) {
@@ -1005,7 +998,7 @@ async function savePoEstimation(id, data, user) {
   const request = await getRequest(id, user);
   if (!request.po_closure_sheet_id) throw appError('Sales must submit PO sheet first.');
   if (request.status !== 'po_submitted_to_estimation') throw appError('PO estimation section can be filled only after sales submits the PO sheet.');
-  if (ESTIMATION_CONTRIBUTOR_ROLES.has(user.role) && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
+  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can fill this PO sheet.', 403);
   }
   const values = jsonObject(data, 'PO estimation data');

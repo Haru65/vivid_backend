@@ -12,7 +12,9 @@ const {
 const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales'));
+const SALES_ROLES = ['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales'];
+const customerReadWriteAccess = requireRoles(...SALES_ROLES);
+const customerLifecycleAccess = requireRoles(...SALES_ROLES);
 
 
 function currentUser(req) {
@@ -26,7 +28,7 @@ function handleError(res, message, error) {
   });
 }
 
-router.get('/', async (req, res) => {
+router.get('/', customerReadWriteAccess, async (req, res) => {
   try {
     res.json(await retrieveCustomers(currentUser(req)));
   } catch (error) {
@@ -34,7 +36,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/lookup', async (req, res) => {
+router.get('/lookup', customerReadWriteAccess, async (req, res) => {
   try {
     res.json(await searchCustomers(req.query.q));
   } catch (error) {
@@ -42,7 +44,7 @@ router.get('/lookup', async (req, res) => {
   }
 });
 
-router.post('/quick-create', async (req, res) => {
+router.post('/quick-create', customerLifecycleAccess, async (req, res) => {
   try {
     res.status(201).json(await quickCreateCustomer(req.body, currentUser(req)));
   } catch (error) {
@@ -50,7 +52,7 @@ router.post('/quick-create', async (req, res) => {
   }
 });
 
-router.post('/create-customer', async (req, res) => {
+router.post('/create-customer', customerLifecycleAccess, async (req, res) => {
   try {
     res.status(201).json(await createCustomer(req.body, currentUser(req)));
   } catch (error) {
@@ -58,7 +60,7 @@ router.post('/create-customer', async (req, res) => {
   }
 });
 
-router.put('/update-customer/:id', async (req, res) => {
+router.put('/update-customer/:id', customerReadWriteAccess, async (req, res) => {
   try {
     const customer = await updateCustomer(req.params.id, req.body, currentUser(req));
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -68,7 +70,7 @@ router.put('/update-customer/:id', async (req, res) => {
   }
 });
 
-router.delete('/delete-customer/:id', async (req, res) => {
+router.delete('/delete-customer/:id', customerLifecycleAccess, async (req, res) => {
   try {
     const customer = await deleteCustomer(req.params.id, currentUser(req));
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -78,7 +80,7 @@ router.delete('/delete-customer/:id', async (req, res) => {
   }
 });
 
-router.post('/renew-amc/:id', async (req, res) => {
+router.post('/renew-amc/:id', customerLifecycleAccess, async (req, res) => {
   try {
     const customer = await renewAmc(req.params.id, currentUser(req));
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
@@ -88,7 +90,7 @@ router.post('/renew-amc/:id', async (req, res) => {
   }
 });
 
-router.post('/from-lead/:leadId', async (req, res) => {
+router.post('/from-lead/:leadId', customerLifecycleAccess, async (req, res) => {
   try {
     const result = await convertLeadToCustomer(req.params.leadId, currentUser(req));
     res.status(result.created ? 201 : 200).json({

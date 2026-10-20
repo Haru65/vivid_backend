@@ -10,12 +10,15 @@ function normalizePostalResponse(payload, pincode) {
   const offices = Array.isArray(payload?.data?.post_offices) ? payload.data.post_offices : [];
   const first = offices.find((office) => office?.state && office?.district);
   if (!payload?.success || !first) throw postalError('No postal location was found for this PIN code.', 404);
+  const postOffices = [...new Set(offices
+    .map((office) => String(office?.office_name || '').trim())
+    .filter(Boolean))];
   return {
     pincode,
     state: String(first.state).trim(),
-    city: String(first.district).trim(),
+    city: postOffices[0] || '',
     district: String(first.district).trim(),
-    post_offices: [...new Set(offices.map((office) => String(office?.office_name || '').trim()).filter(Boolean))],
+    post_offices: postOffices,
   };
 }
 
