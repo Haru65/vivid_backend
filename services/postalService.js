@@ -64,13 +64,20 @@ async function listCitiesForDistrict(stateValue, districtValue) {
     throw postalError('No cities or towns were found for this district.', 404);
   }
   const normalizedState = directoryStateName(state);
-  const cities = [...new Set(result.data.data
+  const cityPincodeSets = new Map();
+  result.data.data
     .filter((record) => String(record?.state || '').toUpperCase() === normalizedState)
-    .map((record) => String(record?.area || '').replace(/\s+(?:B|S|H|G)\.?\s*O\.?(?=\s*(?:\(|$))/gi, '').trim())
-    .filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right));
+    .forEach((record) => {
+      const city = String(record?.area || '').replace(/\s+(?:B|S|H|G)\.?\s*O\.?(?=\s*(?:\(|$))/gi, '').trim();
+      const pincode = String(record?.pincode || '').replace(/\D/g, '');
+      if (!city) return;
+      if (!cityPincodeSets.has(city)) cityPincodeSets.set(city, new Set());
+      if (pincode.length === 6) cityPincodeSets.get(city).add(pincode);
+    });
+  const cities = [...cityPincodeSets.keys()].sort((left, right) => left.localeCompare(right));
   if (!cities.length) throw postalError('No cities or towns were found for this district.', 404);
-  return { country: 'India', state, district, cities };
+  const city_pincodes = Object.fromEntries(cities.map((city) => [city, [...cityPincodeSets.get(city)].sort()]));
+  return { country: 'India', state, district, cities, city_pincodes };
 }
 
 async function lookupPincode(value) {

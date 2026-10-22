@@ -197,6 +197,11 @@ async function createCustomerSchema() {
       company_name VARCHAR(255) NOT NULL,
       gstin VARCHAR(20),
       city VARCHAR(255),
+      country VARCHAR(100) NOT NULL DEFAULT 'India',
+      state VARCHAR(100),
+      district VARCHAR(255),
+      pincode VARCHAR(6),
+      precise_location TEXT,
       company_type VARCHAR(100),
       industry VARCHAR(100),
       company_site VARCHAR(255),
@@ -208,7 +213,6 @@ async function createCustomerSchema() {
       contact_person_email VARCHAR(255),
       billing_address TEXT,
       shipping_address TEXT,
-      state VARCHAR(100),
       amc_status VARCHAR(20) NOT NULL DEFAULT 'None'
         CHECK (amc_status IN ('None', 'Active', 'Due', 'Expired')),
       amc_start_date DATE,
@@ -230,6 +234,10 @@ async function createCustomerSchema() {
   await pool.query(`
     ALTER TABLE customers
     ADD COLUMN IF NOT EXISTS company_type VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS country VARCHAR(100) NOT NULL DEFAULT 'India',
+    ADD COLUMN IF NOT EXISTS district VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS pincode VARCHAR(6),
+    ADD COLUMN IF NOT EXISTS precise_location TEXT,
     ADD COLUMN IF NOT EXISTS industry VARCHAR(100),
     ADD COLUMN IF NOT EXISTS company_site VARCHAR(255),
     ADD COLUMN IF NOT EXISTS segment VARCHAR(100),

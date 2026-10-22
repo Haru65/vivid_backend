@@ -29,7 +29,11 @@ const CUSTOMER_COLUMNS = `
   source_lead_id,
   created_by_user_id,
   created_by_name,
-  raw_data
+  raw_data,
+  country,
+  district,
+  pincode,
+  precise_location
 `;
 function actorName(user) {
   return String(user?.name || '').trim();
@@ -111,6 +115,13 @@ function nullableGstin(value, field) {
     throw validationError(`${field} must be a valid 15-character GSTIN.`);
   }
   return normalized;
+}
+
+function nullablePincode(value, field) {
+  if (value === undefined || value === null || value === '') return null;
+  const digits = String(value).replace(/\D/g, '');
+  if (digits.length !== 6) throw validationError(`${field} must be exactly 6 digits.`);
+  return digits;
 }
 
 function nonNegativeNumber(value, field, defaultValue = 0) {
@@ -216,6 +227,10 @@ function customerValues(customerData) {
     nonNegativeNumber(customerData.lifetime_value, 'Lifetime value'),
     normalizeDate(customerData.customer_since, 'Customer since'),
     normalizeRawData(customerData.raw_data),
+    nullableString(customerData.country, 'Country', 100) || 'India',
+    nullableString(customerData.district, 'District', 255),
+    nullablePincode(customerData.pincode, 'PIN code'),
+    nullableString(customerData.precise_location, 'Precise location', 5000),
   ];
 }
 
@@ -368,8 +383,12 @@ async function createCustomer(customerData, user) {
       customer_since,
       raw_data,
       created_by_user_id,
-      created_by_name
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21::date, CURRENT_DATE), $22, $23, $24)
+      created_by_name,
+      country,
+      district,
+      pincode,
+      precise_location
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21::date, CURRENT_DATE), $22, $27, $28, $23, $24, $25, $26)
     RETURNING ${CUSTOMER_COLUMNS}`,
       [...values, user?.id || null, actorName(user) || null],
     );
@@ -415,8 +434,12 @@ async function updateCustomer(id, customerData, user) {
          lifetime_value = $20,
          customer_since = COALESCE($21::date, customer_since),
          raw_data = $22,
+         country = $23,
+         district = $24,
+         pincode = $25,
+         precise_location = $26,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $23
+     WHERE id = $27
      RETURNING ${CUSTOMER_COLUMNS}`,
       [...values, id],
     );
@@ -471,7 +494,9 @@ async function convertLeadToCustomer(leadId, user) {
     await client.query('BEGIN');
 
     const leadResult = await client.query(
-      `SELECT id, company_name, contact_person_name, contact_person_phone, industry_type, segment, site_location, consultant, customer_id, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, assigned_to
+      `SELECT id, company_name, contact_person_name, contact_person_phone, industry_type, segment, site_location, consultant,
+              billing_state, billing_district, billing_city, billing_pincode, precise_location,
+              customer_id, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, assigned_to
        FROM leads
        WHERE id = $1
        FOR SHARE`,
@@ -520,10 +545,16 @@ async function convertLeadToCustomer(leadId, user) {
         consultant,
         contact_person_name,
         contact_person_phone,
+        country,
+        state,
+        district,
+        city,
+        pincode,
+        precise_location,
         amc_status,
         customer_since,
         source_lead_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'None', CURRENT_DATE, $8)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'India', $8, $9, $10, $11, $12, 'None', CURRENT_DATE, $13)
       RETURNING ${CUSTOMER_COLUMNS}`,
       [
         lead.company_name,
@@ -533,6 +564,11 @@ async function convertLeadToCustomer(leadId, user) {
         lead.consultant || null,
         lead.contact_person_name || null,
         lead.contact_person_phone || null,
+        lead.billing_state || null,
+        lead.billing_district || null,
+        lead.billing_city || null,
+        lead.billing_pincode || null,
+        lead.precise_location || null,
         lead.id,
       ],
     );
