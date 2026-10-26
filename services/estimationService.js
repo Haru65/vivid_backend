@@ -170,6 +170,13 @@ async function updateEnquiryState(id, data, user) {
   }
   if (request.enquiry_state === enquiryState) return request;
 
+  if (user.role === 'sales_engineer') {
+    const { retrieveLead, updateLead } = require('../controller/leads');
+    const { leadSnapshot } = require('./leadChangeService');
+    const lead = await retrieveLead(request.lead_id);
+    return updateLead(request.lead_id, { ...leadSnapshot(lead), enquiry_state: enquiryState, change_reviewers: data.change_reviewers }, user);
+  }
+
   await pool.query(
     `UPDATE leads
      SET enquiry_state = $1

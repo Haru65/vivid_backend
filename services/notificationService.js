@@ -25,9 +25,24 @@ function normalizePayload(data = {}) {
 async function createNotification(recipient, data, db = pool) {
   const payload = normalizePayload(data);
   if (!payload.title) return null;
-  const recipientId = recipient?.id ? Number(recipient.id) : null;
-  const recipientName = actorName(recipient) || (recipient?.name ? String(recipient.name).trim() : null);
-  if (!recipientId && !recipientName) return null;
+  let recipientId = recipient?.id ? Number(recipient.id) : null;
+  let recipientName = actorName(recipient) || (recipient?.name ? String(recipient.name).trim() : null);
+  if (!recipientId && recipientName) {
+    const match = await db.query(
+      `SELECT id, first_name, last_name
+       FROM users
+       WHERE is_active = TRUE
+         AND LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = LOWER(TRIM($1))
+       ORDER BY id ASC
+       LIMIT 1`,
+      [recipientName],
+    );
+    if (match.rows[0]) {
+      recipientId = Number(match.rows[0].id);
+      recipientName = [match.rows[0].first_name, match.rows[0].last_name].filter(Boolean).join(' ');
+    }
+  }
+  if (!recipientId) return null;
   const result = await db.query(
     `INSERT INTO user_notifications (
       recipient_user_id, recipient_name, title, body, category, link_type, link_id, metadata
@@ -61,41 +76,38 @@ async function notifyRole(role, data, db = pool) {
 }
 
 async function listNotifications(user) {
-  const userName = actorName(user);
   const result = await pool.query(
     `SELECT *
      FROM user_notifications
-     WHERE (recipient_user_id = $1 OR LOWER(recipient_name) = LOWER($2))
+     WHERE recipient_user_id = $1
      ORDER BY read_at NULLS FIRST, created_at DESC, id DESC
      LIMIT 80`,
-    [user?.id || null, userName],
+    [user?.id || null],
   );
   return result.rows;
 }
 
 async function markNotificationRead(id, user) {
-  const userName = actorName(user);
   const result = await pool.query(
     `UPDATE user_notifications
      SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
      WHERE id = $1
-       AND (recipient_user_id = $2 OR LOWER(recipient_name) = LOWER($3))
+       AND recipient_user_id = $2
      RETURNING *`,
-    [id, user?.id || null, userName],
+    [id, user?.id || null],
   );
   if (!result.rows[0]) throw appError('Notification not found.', 404);
   return result.rows[0];
 }
 
 async function markAllNotificationsRead(user) {
-  const userName = actorName(user);
   const result = await pool.query(
     `UPDATE user_notifications
      SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
      WHERE read_at IS NULL
-       AND (recipient_user_id = $1 OR LOWER(recipient_name) = LOWER($2))
+       AND recipient_user_id = $1
      RETURNING *`,
-    [user?.id || null, userName],
+    [user?.id || null],
   );
   return { updated: result.rowCount, notifications: result.rows };
 }

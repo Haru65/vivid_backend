@@ -137,6 +137,19 @@ async function createLeadActivitySchema() {
   `);
 
   await pool.query(`
+    UPDATE lead_activities a
+    SET actor_user_id = (
+      SELECT u.id
+      FROM users u
+      WHERE LOWER(TRIM(CONCAT_WS(' ', u.first_name, u.last_name))) = LOWER(TRIM(a.actor_name))
+      ORDER BY u.id ASC
+      LIMIT 1
+    )
+    WHERE a.actor_user_id IS NULL
+      AND NULLIF(TRIM(a.actor_name), '') IS NOT NULL;
+  `);
+
+  await pool.query(`
     ALTER TABLE lead_activities
     DROP CONSTRAINT IF EXISTS lead_activities_activity_type_check;
   `);
@@ -150,6 +163,11 @@ async function createLeadActivitySchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS lead_activities_lead_id_idx
     ON lead_activities (lead_id, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS lead_activities_audit_idx
+    ON lead_activities (created_at DESC, activity_type, actor_user_id);
   `);
 
   console.log('Lead activity schema created successfully.');
@@ -169,12 +187,32 @@ async function createLeadFollowupSchema() {
         CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
       status VARCHAR(20) NOT NULL DEFAULT 'Open'
         CHECK (status IN ('Open', 'Completed', 'Cancelled')),
+      assigned_to_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
       assigned_to VARCHAR(255),
       completed_at TIMESTAMPTZ,
       created_by VARCHAR(255),
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE lead_followups
+    ADD COLUMN IF NOT EXISTS assigned_to_user_id BIGINT;
+  `);
+
+  await pool.query(`
+    UPDATE lead_followups f
+    SET assigned_to_user_id = (
+      SELECT u.id
+      FROM users u
+      WHERE u.is_active = TRUE
+        AND LOWER(TRIM(CONCAT_WS(' ', u.first_name, u.last_name))) = LOWER(TRIM(f.assigned_to))
+      ORDER BY u.id ASC
+      LIMIT 1
+    )
+    WHERE f.assigned_to_user_id IS NULL
+      AND NULLIF(TRIM(f.assigned_to), '') IS NOT NULL;
   `);
 
   await pool.query(`
@@ -185,6 +223,11 @@ async function createLeadFollowupSchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS lead_followups_status_due_idx
     ON lead_followups (status, due_at);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS lead_followups_assignee_status_due_idx
+    ON lead_followups (assigned_to_user_id, status, due_at);
   `);
 
   console.log('Lead followup schema created successfully.');
@@ -724,6 +767,20 @@ async function createNotificationSchema() {
   `);
 
   await pool.query(`
+    UPDATE user_notifications n
+    SET recipient_user_id = (
+      SELECT u.id
+      FROM users u
+      WHERE u.is_active = TRUE
+        AND LOWER(TRIM(CONCAT_WS(' ', u.first_name, u.last_name))) = LOWER(TRIM(n.recipient_name))
+      ORDER BY u.id ASC
+      LIMIT 1
+    )
+    WHERE n.recipient_user_id IS NULL
+      AND NULLIF(TRIM(n.recipient_name), '') IS NOT NULL;
+  `);
+
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS user_notifications_recipient_idx
     ON user_notifications (recipient_user_id, recipient_name, read_at, created_at DESC);
   `);
@@ -1010,6 +1067,38 @@ async function createSettingsSchema() {
   console.log('Settings schema created successfully.');
 }
 
+async function createLeadChangeRequestSchema(db = pool) {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS lead_change_requests (
+      id SERIAL PRIMARY KEY,
+      lead_id INTEGER NOT NULL,
+      company_name VARCHAR(255) NOT NULL,
+      requested_by_user_id BIGINT NOT NULL,
+      requested_by_name VARCHAR(255) NOT NULL,
+      sales_head_id BIGINT NOT NULL,
+      estimation_head_id BIGINT NOT NULL,
+      before_snapshot JSONB NOT NULL,
+      proposed_snapshot JSONB NOT NULL,
+      changes JSONB NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'rejected', 'conflict')),
+      sales_approved_at TIMESTAMPTZ,
+      estimation_approved_at TIMESTAMPTZ,
+      sales_comments TEXT,
+      estimation_comments TEXT,
+      rejected_by_user_id BIGINT,
+      rejection_reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      resolved_at TIMESTAMPTZ,
+      CHECK (sales_head_id <> estimation_head_id),
+      CHECK (requested_by_user_id <> sales_head_id AND requested_by_user_id <> estimation_head_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS lead_change_requests_pending_lead_idx
+      ON lead_change_requests (lead_id) WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS lead_change_requests_review_idx
+      ON lead_change_requests (sales_head_id, estimation_head_id, status, created_at DESC);
+  `);
+}
+
 async function createSchemas() {
   await createUserSchema();
   try {
@@ -1031,6 +1120,7 @@ async function createSchemas() {
   await createEstimationRequestSchema();
   await createPoClosureSheetSchema();
   await createHandoverProjectSchema();
+  await createLeadChangeRequestSchema();
 }
 
-module.exports = { createUserSchema, createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createNotificationSchema, createEstimationRequestSchema, createPoClosureSheetSchema, createMeetingSchema, createSettingsSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createSchemas };
+module.exports = { createUserSchema, createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createNotificationSchema, createEstimationRequestSchema, createPoClosureSheetSchema, createMeetingSchema, createSettingsSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createLeadChangeRequestSchema, createSchemas };

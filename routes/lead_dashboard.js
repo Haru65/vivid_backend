@@ -158,8 +158,7 @@ router.post('/accept-proposal/:id', async (req, res) => {
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     res.json({
       ...lead,
-      quotation_delivery: 'sent',
-      message: 'Proposal accepted and quotation marked as sent',
+      ...(lead.approval_required ? {} : { quotation_delivery: 'sent', message: 'Proposal accepted and quotation marked as sent' }),
     });
   } catch (error) {
     handleActivityError(res, 'Unable to accept proposal', error);

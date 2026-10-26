@@ -87,11 +87,11 @@ function validationError(message) {
 }
 
 function activityColumns(alias = 'a') {
-  return `${alias}.id, ${alias}.lead_id, ${alias}.activity_type, ${alias}.content, ${alias}.actor_name, ${alias}.metadata, ${alias}.created_at`;
+  return `${alias}.id, ${alias}.lead_id, ${alias}.activity_type, ${alias}.content, ${alias}.actor_user_id, ${alias}.actor_name, ${alias}.metadata, ${alias}.created_at`;
 }
 
 function followupColumns(alias = 'f') {
-  return `${alias}.id, ${alias}.lead_id, ${alias}.followup_type, ${alias}.title, ${alias}.notes, ${alias}.due_at, ${alias}.priority, ${alias}.status, ${alias}.assigned_to, ${alias}.completed_at, ${alias}.created_by, ${alias}.created_at, ${alias}.updated_at`;
+  return `${alias}.id, ${alias}.lead_id, ${alias}.followup_type, ${alias}.title, ${alias}.notes, ${alias}.due_at, ${alias}.priority, ${alias}.status, ${alias}.assigned_to_user_id, ${alias}.assigned_to, ${alias}.completed_at, ${alias}.created_by, ${alias}.created_at, ${alias}.updated_at`;
 }
 
 function followupJson(alias = 'f') {
@@ -104,6 +104,7 @@ function followupJson(alias = 'f') {
     'due_at', ${alias}.due_at,
     'priority', ${alias}.priority,
     'status', ${alias}.status,
+    'assigned_to_user_id', ${alias}.assigned_to_user_id,
     'assigned_to', ${alias}.assigned_to,
     'completed_at', ${alias}.completed_at,
     'created_by', ${alias}.created_by,
@@ -140,14 +141,18 @@ function isIndividualSales(user) {
 function canAccessLead(lead, user) {
   if (!isIndividualSales(user)) return true;
   return String(lead?.sales_owner_id || '') === String(user?.id || '')
-    || String(lead?.assigned_to || '').trim() === actorName(user);
+    || (!lead?.sales_owner_id && String(lead?.assigned_to || '').trim() === actorName(user));
 }
 
 async function resolveSalesOwner(data, user, db = pool) {
-  if (isIndividualSales(user)) {
+  if (['salesperson', 'sales_engineer', 'presales'].includes(roleOf(user))) {
+    if ((data.sales_owner_id && String(data.sales_owner_id) !== String(user.id))
+      || (data.assigned_to && String(data.assigned_to).trim() !== actorName(user))) {
+      throw Object.assign(new Error('Only Admin and Sales Head can assign a lead to another salesperson.'), { statusCode: 403 });
+    }
     return { id: Number(user.id), name: actorName(user) };
   }
-  if (!['admin', 'sales_head', 'presales'].includes(roleOf(user))) {
+  if (!['admin', 'sales_head'].includes(roleOf(user))) {
     throw Object.assign(new Error('Only Sales Head or Admin can assign leads.'), { statusCode: 403 });
   }
   const ownerId = Number(data.sales_owner_id);
@@ -230,7 +235,7 @@ function jsonObject(value, field) {
   return value;
 }
 
-function normalizeFollowup(data = {}, fallbackAssignee) {
+function normalizeFollowup(data = {}) {
   const followupType = data.followup_type || 'General';
   if (!FOLLOWUP_TYPES.has(followupType)) throw validationError('Follow-up type is invalid.');
   const priority = data.priority || 'Medium';
@@ -245,8 +250,39 @@ function normalizeFollowup(data = {}, fallbackAssignee) {
     dueAt: timestamp(data.due_at, 'Follow-up due date'),
     priority,
     status,
-    assignedTo: text(data.assigned_to || fallbackAssignee, 'Assigned to', 255),
   };
+}
+
+async function resolveFollowupAssignee(data = {}, fallback = {}) {
+  const requestedId = Number(data.assigned_to_user_id || fallback.id);
+  const requestedName = text(data.assigned_to || fallback.name, 'Assigned to', 255);
+  const result = Number.isInteger(requestedId) && requestedId > 0
+    ? await pool.query(
+      `SELECT id, first_name, last_name, role FROM users WHERE id = $1 AND is_active = TRUE`,
+      [requestedId],
+    )
+    : await pool.query(
+      `SELECT id, first_name, last_name, role
+       FROM users
+       WHERE is_active = TRUE
+         AND LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = LOWER(TRIM($1))
+       ORDER BY id ASC
+       LIMIT 1`,
+      [requestedName],
+    );
+  const assignee = result.rows[0];
+  if (!assignee) throw validationError('Select an active user for this follow-up.');
+  return {
+    id: assignee.id,
+    name: [assignee.first_name, assignee.last_name].filter(Boolean).join(' '),
+    role: assignee.role,
+  };
+}
+
+function canReceiveLeadFollowup(lead, assignee) {
+  return ['admin', 'sales_head', 'presales'].includes(roleOf(assignee))
+    || String(lead?.sales_owner_id || '') === String(assignee?.id || '')
+    || String(lead?.assigned_to || '').trim() === actorName(assignee);
 }
 
 async function leadForAccess(leadId, user) {
@@ -271,10 +307,10 @@ async function leadForAccess(leadId, user) {
 async function insertLeadActivity(leadId, activityData, user, db = pool) {
   const { type, content, metadata } = normalizeActivity(activityData);
   const result = await db.query(
-    `INSERT INTO lead_activities (lead_id, activity_type, content, actor_name, metadata)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO lead_activities (lead_id, activity_type, content, actor_user_id, actor_name, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING ${activityColumns('lead_activities')}`,
-    [leadId, type, content, actorName(user), JSON.stringify(metadata)],
+    [leadId, type, content, user?.id || null, actorName(user), JSON.stringify(metadata)],
   );
   return result.rows[0];
 }
@@ -297,6 +333,7 @@ async function retrieveLead(id) {
           'lead_id', a.lead_id,
           'activity_type', a.activity_type,
           'content', a.content,
+          'actor_user_id', a.actor_user_id,
           'actor_name', a.actor_name,
           'metadata', a.metadata,
           'created_at', a.created_at
@@ -453,7 +490,7 @@ async function ensureLeadStatusAllowed(lead, nextStatus) {
 async function retrieveLeads(user) {
   const individual = isIndividualSales(user);
   const params = individual ? [user?.id || null, actorName(user)] : [];
-  const where = individual ? `WHERE NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1 OR l.assigned_to = $2` : '';
+  const where = individual ? `WHERE NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT = $1 OR (NULLIF(to_jsonb(l)->>'sales_owner_id', '') IS NULL AND l.assigned_to = $2)` : '';
   const result = await pool.query(`
     SELECT ${LEAD_TABLE_COLUMNS},
       COALESCE((
@@ -462,6 +499,7 @@ async function retrieveLeads(user) {
           'lead_id', a.lead_id,
           'activity_type', a.activity_type,
           'content', a.content,
+          'actor_user_id', a.actor_user_id,
           'actor_name', a.actor_name,
           'metadata', a.metadata,
           'created_at', a.created_at
@@ -548,7 +586,14 @@ async function retrieveLeadFollowups(leadId, user) {
 
 async function createLeadFollowup(leadId, followupData, user) {
   const lead = await leadForAccess(leadId, user);
-  const values = normalizeFollowup(followupData, lead.assigned_to || actorName(user));
+  const values = normalizeFollowup(followupData);
+  const assignee = await resolveFollowupAssignee(followupData, {
+    id: lead.sales_owner_id || user?.id,
+    name: lead.assigned_to || actorName(user),
+  });
+  if (!canReceiveLeadFollowup(lead, assignee)) {
+    throw validationError('Assign the follow-up to the lead owner or a user with team lead access.');
+  }
   const result = await pool.query(
     `INSERT INTO lead_followups (
       lead_id,
@@ -558,12 +603,13 @@ async function createLeadFollowup(leadId, followupData, user) {
       due_at,
       priority,
       status,
+      assigned_to_user_id,
       assigned_to,
       completed_at,
       created_by
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $7::varchar = 'Completed' THEN CURRENT_TIMESTAMP ELSE NULL END, $9)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $7::varchar = 'Completed' THEN CURRENT_TIMESTAMP ELSE NULL END, $10)
     RETURNING ${followupColumns('lead_followups')}`,
-    [lead.id, values.followupType, values.title, values.notes, values.dueAt, values.priority, values.status, values.assignedTo, actorName(user)],
+    [lead.id, values.followupType, values.title, values.notes, values.dueAt, values.priority, values.status, assignee.id, assignee.name, actorName(user)],
   );
   const followup = result.rows[0];
   await logLeadActivity(lead.id, {
@@ -583,7 +629,14 @@ async function updateLeadFollowup(leadId, followupId, followupData, user) {
   );
   if (!existing.rows[0]) return null;
 
-  const values = normalizeFollowup(followupData, existing.rows[0].assigned_to || lead.assigned_to || actorName(user));
+  const values = normalizeFollowup(followupData);
+  const assignee = await resolveFollowupAssignee(followupData, {
+    id: existing.rows[0].assigned_to_user_id || lead.sales_owner_id || user?.id,
+    name: existing.rows[0].assigned_to || lead.assigned_to || actorName(user),
+  });
+  if (!canReceiveLeadFollowup(lead, assignee)) {
+    throw validationError('Assign the follow-up to the lead owner or a user with team lead access.');
+  }
   const result = await pool.query(
     `UPDATE lead_followups
      SET followup_type = $1,
@@ -592,16 +645,17 @@ async function updateLeadFollowup(leadId, followupId, followupData, user) {
          due_at = $4,
          priority = $5,
          status = $6,
-         assigned_to = $7,
+         assigned_to_user_id = $7,
+         assigned_to = $8,
          completed_at = CASE
            WHEN $6::varchar = 'Completed' AND completed_at IS NULL THEN CURRENT_TIMESTAMP
            WHEN $6::varchar <> 'Completed' THEN NULL
            ELSE completed_at
          END,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $8 AND lead_id = $9
+     WHERE id = $9 AND lead_id = $10
      RETURNING ${followupColumns('lead_followups')}`,
-    [values.followupType, values.title, values.notes, values.dueAt, values.priority, values.status, values.assignedTo, followupId, lead.id],
+    [values.followupType, values.title, values.notes, values.dueAt, values.priority, values.status, assignee.id, assignee.name, followupId, lead.id],
   );
   const followup = result.rows[0] || null;
   if (!followup) return null;
@@ -792,13 +846,14 @@ async function createLead(leadData, user) {
   return (await retrieveLead(lead.id)) || lead;
 }
 
-async function updateLead(id, leadData, user) {
-  const client = await pool.connect();
+async function updateLead(id, leadData, user, options = {}) {
+  const ownTransaction = !options.db;
+  const client = options.db || await pool.connect();
   let previous;
   let lead;
   let owner;
   try {
-    await client.query('BEGIN');
+    if (ownTransaction) await client.query('BEGIN');
     const previousResult = await client.query(
       `SELECT ${LEAD_COLUMNS}
        FROM leads
@@ -808,14 +863,24 @@ async function updateLead(id, leadData, user) {
     );
     previous = previousResult.rows[0];
     if (!previous) {
-      await client.query('ROLLBACK');
+      if (ownTransaction) await client.query('ROLLBACK');
       return null;
     }
     if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
 
+    if (['admin', 'sales_head'].includes(roleOf(user))) {
+      owner = await resolveSalesOwner({ ...leadData, sales_owner_id: leadData.sales_owner_id || previous.sales_owner_id }, user, client);
+    } else {
+      if ((leadData.sales_owner_id && String(leadData.sales_owner_id) !== String(previous.sales_owner_id || ''))
+        || (leadData.assigned_to !== undefined && String(leadData.assigned_to || '').trim() !== String(previous.assigned_to || '').trim())) {
+        throw Object.assign(new Error('Only Admin and Sales Head can change the assigned salesperson.'), { statusCode: 403 });
+      }
+      owner = { id: previous.sales_owner_id || null, name: previous.assigned_to };
+    }
     const customer = await selectedCustomerForLead(client, leadData.customer_id || previous.customer_id);
-    owner = await resolveSalesOwner(leadData, user, client);
-    const ownedLeadData = leadDataForCustomer({ ...leadData, assigned_to: owner.name }, customer);
+    const ownedLeadData = options.approvedChangeId
+      ? { ...leadData, assigned_to: owner.name }
+      : leadDataForCustomer({ ...leadData, assigned_to: owner.name }, customer);
     await ensureLeadSourceAllowed(ownedLeadData.lead_source, previous.lead_source);
     await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
     const values = leadValues(ownedLeadData);
@@ -823,6 +888,14 @@ async function updateLead(id, leadData, user) {
       ...previous,
       quotation: values[12] || previous.quotation,
     }, values[14]);
+    if (roleOf(user) === 'sales_engineer' && !options.approvedChangeId) {
+      const { LEAD_EDIT_FIELDS, submitLeadChange } = require('../services/leadChangeService');
+      const normalized = Object.fromEntries(LEAD_EDIT_FIELDS.slice(0, 27).map((field, index) => [field, values[index]]));
+      const proposed = { ...normalized, customer_id: customer.id, sales_owner_id: owner.id };
+      const request = await submitLeadChange(client, previous, proposed, user, leadData.change_reviewers);
+      if (ownTransaction) await client.query('COMMIT');
+      return request;
+    }
     const updateValues = [...values.slice(0, 6), customer.id, ...values.slice(6, 17), owner.id, owner.id, ...values.slice(17), id];
 
     const result = await client.query(
@@ -886,18 +959,21 @@ async function updateLead(id, leadData, user) {
         [lead.project_name, id],
       );
     }
-    await client.query('COMMIT');
+    if (ownTransaction) await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (ownTransaction) await client.query('ROLLBACK').catch(() => {});
     throw error;
   } finally {
-    client.release();
+    if (ownTransaction) client.release();
   }
 
-  await Promise.all(leadUpdateActivities(previous, lead).map((content) => logLeadActivity(lead.id, {
-    activity_type: 'system',
-    content,
-  }, user)));
+  // Approved changes and their audit records commit together with both votes.
+  const activityDb = options.db || pool;
+  for (const content of leadUpdateActivities(previous, lead)) {
+    const activity = { activity_type: 'system', content, metadata: options.approvedChangeId ? { request_id: options.approvedChangeId } : {} };
+    if (options.db) await insertLeadActivity(lead.id, activity, user, activityDb);
+    else await logLeadActivity(lead.id, activity, user, activityDb);
+  }
 
   if ((changed(previous, lead, 'assigned_to') || String(previous.sales_owner_id || '') !== String(owner.id))
     && String(owner.id) !== String(user?.id || '')) {
@@ -907,10 +983,10 @@ async function updateLead(id, leadData, user) {
       category: 'lead',
       link_type: 'lead',
       link_id: lead.id,
-    });
+    }, activityDb);
   }
 
-  return (await retrieveLead(lead.id)) || lead;
+  return options.db ? lead : (await retrieveLead(lead.id)) || lead;
 }
 
 async function deleteLead(id, user) {
@@ -946,7 +1022,26 @@ async function deleteLead(id, user) {
       [id],
     );
     await client.query('DELETE FROM lead_followups WHERE lead_id = $1', [id]);
-    await client.query('DELETE FROM lead_activities WHERE lead_id = $1', [id]);
+    const leadToDelete = await client.query(
+      `SELECT
+         company_name,
+         NULLIF(to_jsonb(leads)->>'project_name', '') AS project_name,
+         NULLIF(to_jsonb(leads)->>'enquiry_number', '') AS enquiry_number
+       FROM leads
+       WHERE id = $1`,
+      [id],
+    );
+    const leadSnapshot = leadToDelete.rows[0] || {};
+    await insertLeadActivity(id, {
+      activity_type: 'system',
+      content: `Lead deleted: ${leadSnapshot.company_name || `Lead #${id}`}`,
+      metadata: {
+        event: 'lead_deleted',
+        company_name: leadSnapshot.company_name || null,
+        project_name: leadSnapshot.project_name || null,
+        enquiry_number: leadSnapshot.enquiry_number || null,
+      },
+    }, user, client);
     const result = await client.query('DELETE FROM leads WHERE id = $1 RETURNING id', [id]);
     await client.query('COMMIT');
     return result.rows[0] || null;
@@ -969,6 +1064,10 @@ async function acceptProposal(id, quotation, user) {
   if (!previous) return null;
   if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can accept only proposals assigned to you.'), { statusCode: 403 });
   const sentQuotation = await ensureLeadStatusAllowed(previous, 'Proposal Accepted');
+  if (roleOf(user) === 'sales_engineer') {
+    const { leadSnapshot } = require('../services/leadChangeService');
+    return updateLead(id, { ...leadSnapshot(previous), lead_status: 'Proposal Accepted', quotation: quotation && quotation !== 'Sent' ? quotation : sentQuotation.quotation_number }, user);
+  }
   const result = await pool.query(
     `UPDATE leads
      SET lead_status = 'Proposal Accepted',
