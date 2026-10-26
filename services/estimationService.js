@@ -111,7 +111,7 @@ const SELECT_REQUEST = `
 
 function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
     WHEN 'Vivid Approved' THEN 1
-    WHEN 'ABB Approval' THEN 2
+    WHEN 'OEM' THEN 2
     ELSE 3
   END, er.updated_at DESC, er.id DESC`) {
   return `

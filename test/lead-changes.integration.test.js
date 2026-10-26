@@ -46,7 +46,7 @@ test('PostgreSQL: submission, dual approval, logs, notification targeting and st
       INSERT INTO leads (id, company_name, project_name, contact_person_name, contact_person_email, contact_person_phone,
         enquiry_date, enquiry_state, sales_approval_status, priority, customer_id, lead_source, lead_status, assigned_to, sales_owner_id)
         VALUES (7, 'Acme', 'Original project', 'Customer', 'customer@example.com', '9876543210', '2026-10-26',
-          'Purchase', 'Not Vivid Approved', 'Medium', 10, 'Website', 'New', 'Sales Engineer', 1);
+          'Purchase', 'Vivid Not Approved', 'Medium', 10, 'Website', 'New', 'Sales Engineer', 1);
       INSERT INTO customers (id, company_name) VALUES (10, 'Acme');
       INSERT INTO estimation_requests (id, lead_id, status, assigned_engineer_id, estimation_head_id)
         VALUES (8, 7, 'assigned', 4, 3);

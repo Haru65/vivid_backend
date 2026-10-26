@@ -18,8 +18,8 @@ async function createLeadSchema() {
       enquiry_date DATE NOT NULL,
       enquiry_state VARCHAR(20) NOT NULL DEFAULT 'Purchase'
         CHECK (enquiry_state IN ('Purchase', 'Tender', 'Budget')),
-      sales_approval_status VARCHAR(30) NOT NULL DEFAULT 'Not Vivid Approved'
-        CHECK (sales_approval_status IN ('Vivid Approved', 'ABB Approval', 'Not Vivid Approved')),
+      sales_approval_status VARCHAR(30) NOT NULL DEFAULT 'Vivid Not Approved'
+        CHECK (sales_approval_status IN ('Vivid Approved', 'Vivid Not Approved', 'OEM')),
       priority VARCHAR(20) NOT NULL DEFAULT 'Medium'
         CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
       customer_id INTEGER,
@@ -57,7 +57,7 @@ async function createLeadSchema() {
     ADD COLUMN IF NOT EXISTS quotation VARCHAR(255),
     ADD COLUMN IF NOT EXISTS enquiry_date DATE NOT NULL DEFAULT CURRENT_DATE,
     ADD COLUMN IF NOT EXISTS enquiry_state VARCHAR(20) NOT NULL DEFAULT 'Purchase',
-    ADD COLUMN IF NOT EXISTS sales_approval_status VARCHAR(30) NOT NULL DEFAULT 'Not Vivid Approved',
+    ADD COLUMN IF NOT EXISTS sales_approval_status VARCHAR(30) NOT NULL DEFAULT 'Vivid Not Approved',
     ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'Medium',
     ADD COLUMN IF NOT EXISTS customer_id INTEGER,
     ADD COLUMN IF NOT EXISTS segment VARCHAR(100),
@@ -95,9 +95,17 @@ async function createLeadSchema() {
   await pool.query(`
     ALTER TABLE leads
     DROP CONSTRAINT IF EXISTS leads_sales_approval_status_check;
+    UPDATE leads
+    SET sales_approval_status = CASE
+      WHEN sales_approval_status = 'ABB Approval' THEN 'OEM'
+      WHEN sales_approval_status = 'Not Vivid Approved' THEN 'Vivid Not Approved'
+      ELSE sales_approval_status
+    END;
+    ALTER TABLE leads
+    ALTER COLUMN sales_approval_status SET DEFAULT 'Vivid Not Approved';
     ALTER TABLE leads
     ADD CONSTRAINT leads_sales_approval_status_check
-    CHECK (sales_approval_status IN ('Vivid Approved', 'ABB Approval', 'Not Vivid Approved'));
+    CHECK (sales_approval_status IN ('Vivid Approved', 'Vivid Not Approved', 'OEM'));
   `);
 
   await pool.query(`
@@ -190,6 +198,10 @@ async function createLeadFollowupSchema() {
       assigned_to_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
       assigned_to VARCHAR(255),
       completed_at TIMESTAMPTZ,
+      completion_latitude NUMERIC(10, 7),
+      completion_longitude NUMERIC(10, 7),
+      completion_accuracy_m NUMERIC(10, 2),
+      location_captured_at TIMESTAMPTZ,
       created_by VARCHAR(255),
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -198,7 +210,11 @@ async function createLeadFollowupSchema() {
 
   await pool.query(`
     ALTER TABLE lead_followups
-    ADD COLUMN IF NOT EXISTS assigned_to_user_id BIGINT;
+    ADD COLUMN IF NOT EXISTS assigned_to_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS completion_latitude NUMERIC(10, 7),
+    ADD COLUMN IF NOT EXISTS completion_longitude NUMERIC(10, 7),
+    ADD COLUMN IF NOT EXISTS completion_accuracy_m NUMERIC(10, 2),
+    ADD COLUMN IF NOT EXISTS location_captured_at TIMESTAMPTZ;
   `);
 
   await pool.query(`
@@ -239,6 +255,7 @@ async function createCustomerSchema() {
       id SERIAL PRIMARY KEY,
       company_name VARCHAR(255) NOT NULL,
       gstin VARCHAR(20),
+      pan VARCHAR(10),
       city VARCHAR(255),
       country VARCHAR(100) NOT NULL DEFAULT 'India',
       state VARCHAR(100),
@@ -252,8 +269,12 @@ async function createCustomerSchema() {
       site_location VARCHAR(255),
       consultant VARCHAR(255),
       contact_person_name VARCHAR(255),
+      designation VARCHAR(255),
       contact_person_phone VARCHAR(20),
       contact_person_email VARCHAR(255),
+      alternate_contact_name VARCHAR(255),
+      alternate_contact_phone VARCHAR(20),
+      alternate_contact_email VARCHAR(255),
       billing_address TEXT,
       shipping_address TEXT,
       amc_status VARCHAR(20) NOT NULL DEFAULT 'None'
@@ -270,6 +291,9 @@ async function createCustomerSchema() {
       source_lead_id INTEGER,
       created_by_user_id BIGINT,
       created_by_name VARCHAR(255),
+      account_owner_user_id BIGINT,
+      account_owner_name VARCHAR(255),
+      remarks TEXT,
       raw_data JSONB
     );
   `);
@@ -277,6 +301,7 @@ async function createCustomerSchema() {
   await pool.query(`
     ALTER TABLE customers
     ADD COLUMN IF NOT EXISTS company_type VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS pan VARCHAR(10),
     ADD COLUMN IF NOT EXISTS country VARCHAR(100) NOT NULL DEFAULT 'India',
     ADD COLUMN IF NOT EXISTS district VARCHAR(255),
     ADD COLUMN IF NOT EXISTS pincode VARCHAR(6),
@@ -287,13 +312,20 @@ async function createCustomerSchema() {
     ADD COLUMN IF NOT EXISTS site_location VARCHAR(255),
     ADD COLUMN IF NOT EXISTS consultant VARCHAR(255),
     ADD COLUMN IF NOT EXISTS contact_person_email VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS designation VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS alternate_contact_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS alternate_contact_phone VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS alternate_contact_email VARCHAR(255),
     ADD COLUMN IF NOT EXISTS billing_address TEXT,
     ADD COLUMN IF NOT EXISTS shipping_address TEXT,
     ADD COLUMN IF NOT EXISTS state VARCHAR(100),
     ADD COLUMN IF NOT EXISTS amc_start_date DATE,
     ADD COLUMN IF NOT EXISTS amc_end_date DATE,
     ADD COLUMN IF NOT EXISTS created_by_user_id BIGINT,
-    ADD COLUMN IF NOT EXISTS created_by_name VARCHAR(255);
+    ADD COLUMN IF NOT EXISTS created_by_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS account_owner_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS account_owner_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS remarks TEXT;
   `);
 
   await pool.query(`
@@ -304,6 +336,11 @@ async function createCustomerSchema() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS customers_amc_status_idx
     ON customers (amc_status);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS customers_account_owner_idx
+    ON customers (account_owner_user_id, updated_at DESC);
   `);
 
   await pool.query(`

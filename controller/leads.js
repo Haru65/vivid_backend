@@ -74,7 +74,7 @@ const ACTIVITY_TYPES = new Set(['note', 'call', 'whatsapp', 'system', 'email', '
 const LEAD_STATUSES = new Set(['New', 'Qualified', 'Proposal Sent', 'Negotiation', 'Proposal Accepted', 'Lost']);
 const LEAD_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
 const ENQUIRY_STATES = new Set(['Purchase', 'Tender', 'Budget']);
-const SALES_APPROVAL_STATUSES = new Set(['Vivid Approved', 'ABB Approval', 'Not Vivid Approved']);
+const SALES_APPROVAL_STATUSES = new Set(['Vivid Approved', 'Vivid Not Approved', 'OEM']);
 const QUOTATION_REQUIRED_STATUSES = new Set(['Proposal Sent', 'Negotiation', 'Proposal Accepted']);
 const FOLLOWUP_TYPES = new Set(['Call', 'WhatsApp', 'Email', 'Meeting', 'Payment', 'Quotation', 'General']);
 const FOLLOWUP_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
@@ -91,7 +91,7 @@ function activityColumns(alias = 'a') {
 }
 
 function followupColumns(alias = 'f') {
-  return `${alias}.id, ${alias}.lead_id, ${alias}.followup_type, ${alias}.title, ${alias}.notes, ${alias}.due_at, ${alias}.priority, ${alias}.status, ${alias}.assigned_to_user_id, ${alias}.assigned_to, ${alias}.completed_at, ${alias}.created_by, ${alias}.created_at, ${alias}.updated_at`;
+  return `${alias}.id, ${alias}.lead_id, ${alias}.followup_type, ${alias}.title, ${alias}.notes, ${alias}.due_at, ${alias}.priority, ${alias}.status, ${alias}.assigned_to_user_id, ${alias}.assigned_to, ${alias}.completed_at, ${alias}.completion_latitude, ${alias}.completion_longitude, ${alias}.completion_accuracy_m, ${alias}.location_captured_at, ${alias}.created_by, ${alias}.created_at, ${alias}.updated_at`;
 }
 
 function followupJson(alias = 'f') {
@@ -107,6 +107,10 @@ function followupJson(alias = 'f') {
     'assigned_to_user_id', ${alias}.assigned_to_user_id,
     'assigned_to', ${alias}.assigned_to,
     'completed_at', ${alias}.completed_at,
+    'completion_latitude', ${alias}.completion_latitude,
+    'completion_longitude', ${alias}.completion_longitude,
+    'completion_accuracy_m', ${alias}.completion_accuracy_m,
+    'location_captured_at', ${alias}.location_captured_at,
     'created_by', ${alias}.created_by,
     'created_at', ${alias}.created_at,
     'updated_at', ${alias}.updated_at
@@ -125,6 +129,25 @@ function normalizeActivity(activityData = {}) {
     ? activityData.metadata
     : {};
   return { type, content, metadata };
+}
+
+function normalizeCompletionLocation(location) {
+  if (!location || typeof location !== 'object' || Array.isArray(location)) {
+    throw validationError('Current location is required to complete an onsite meeting.');
+  }
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  const accuracy = Number(location.accuracy);
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+    throw validationError('The captured latitude is invalid. Please capture your location again.');
+  }
+  if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    throw validationError('The captured longitude is invalid. Please capture your location again.');
+  }
+  if (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 500) {
+    throw validationError('Location accuracy must be within 500 metres. Enable precise location and try again.');
+  }
+  return { latitude, longitude, accuracy };
 }
 
 function actorName(user) {
@@ -373,7 +396,7 @@ function leadUpdateActivities(previous, next) {
     ['contact_person_phone', 'contact phone'],
     ['enquiry_date', 'enquiry date'],
     ['enquiry_state', 'enquiry state'],
-    ['sales_approval_status', 'sales approval status'],
+    ['sales_approval_status', 'approved make'],
     ['priority', 'priority'],
     ['segment', 'segment'],
     ['site_location', 'site location'],
@@ -405,8 +428,8 @@ function leadValues(leadData) {
   if (!LEAD_PRIORITIES.has(priority)) throw validationError('Priority is invalid.');
   const enquiryState = text(leadData.enquiry_state || 'Purchase', 'Enquiry state', 20, true);
   if (!ENQUIRY_STATES.has(enquiryState)) throw validationError('Enquiry state is invalid.');
-  const salesApprovalStatus = text(leadData.sales_approval_status || 'Not Vivid Approved', 'Sales approval status', 30, true);
-  if (!SALES_APPROVAL_STATUSES.has(salesApprovalStatus)) throw validationError('Sales approval status is invalid.');
+  const salesApprovalStatus = text(leadData.sales_approval_status || 'Vivid Not Approved', 'Approved Make', 30, true);
+  if (!SALES_APPROVAL_STATUSES.has(salesApprovalStatus)) throw validationError('Approved Make is invalid.');
   return [
     text(leadData.company_name, 'Company name', 255, true),
     text(leadData.contact_person_name, 'Contact person', 255, true),
@@ -417,7 +440,7 @@ function leadValues(leadData) {
     text(leadData.segment, 'Segment', 100),
     text(leadData.site_location, 'Site location', 255),
     text(leadData.consultant, 'Consultant', 255),
-    text(Array.isArray(leadData.enquiry_product) ? leadData.enquiry_product.join(', ') : leadData.enquiry_product, 'Enquiry product', 1000),
+    text(Array.isArray(leadData.enquiry_product) ? leadData.enquiry_product.join(', ') : leadData.enquiry_product, 'Products', 1000, true),
     text(leadData.enquiry_notes, 'Enquiry notes', 5000),
     text(leadData.industry_type, 'Industry type', 100),
     text(leadData.quotation, 'Quotation reference', 255),
@@ -587,6 +610,9 @@ async function retrieveLeadFollowups(leadId, user) {
 async function createLeadFollowup(leadId, followupData, user) {
   const lead = await leadForAccess(leadId, user);
   const values = normalizeFollowup(followupData);
+  if (values.followupType === 'Meeting' && values.status === 'Completed') {
+    throw validationError('Schedule the onsite meeting first, then complete it with a captured location.');
+  }
   const assignee = await resolveFollowupAssignee(followupData, {
     id: lead.sales_owner_id || user?.id,
     name: lead.assigned_to || actorName(user),
@@ -630,6 +656,9 @@ async function updateLeadFollowup(leadId, followupId, followupData, user) {
   if (!existing.rows[0]) return null;
 
   const values = normalizeFollowup(followupData);
+  if (values.followupType === 'Meeting' && values.status === 'Completed' && existing.rows[0].status !== 'Completed') {
+    throw validationError('Use the onsite completion action so the meeting location can be captured.');
+  }
   const assignee = await resolveFollowupAssignee(followupData, {
     id: existing.rows[0].assigned_to_user_id || lead.sales_owner_id || user?.id,
     name: existing.rows[0].assigned_to || lead.assigned_to || actorName(user),
@@ -652,6 +681,10 @@ async function updateLeadFollowup(leadId, followupId, followupData, user) {
            WHEN $6::varchar <> 'Completed' THEN NULL
            ELSE completed_at
          END,
+         completion_latitude = CASE WHEN $6::varchar = 'Completed' THEN completion_latitude ELSE NULL END,
+         completion_longitude = CASE WHEN $6::varchar = 'Completed' THEN completion_longitude ELSE NULL END,
+         completion_accuracy_m = CASE WHEN $6::varchar = 'Completed' THEN completion_accuracy_m ELSE NULL END,
+         location_captured_at = CASE WHEN $6::varchar = 'Completed' THEN location_captured_at ELSE NULL END,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $9 AND lead_id = $10
      RETURNING ${followupColumns('lead_followups')}`,
@@ -670,22 +703,52 @@ async function updateLeadFollowup(leadId, followupId, followupData, user) {
   return followup;
 }
 
-async function completeLeadFollowup(leadId, followupId, user) {
+async function completeLeadFollowup(leadId, followupId, completionData, user) {
   const lead = await leadForAccess(leadId, user);
+  const existing = await pool.query(
+    `SELECT ${followupColumns()}
+     FROM lead_followups f
+     WHERE f.id = $1 AND f.lead_id = $2`,
+    [followupId, lead.id],
+  );
+  const current = existing.rows[0] || null;
+  if (!current) return null;
+  if (current.status === 'Completed') return current;
+
+  const onsite = current.followup_type === 'Meeting';
+  if (onsite && String(current.assigned_to_user_id || '') !== String(user?.id || '')) {
+    const error = new Error('Only the assigned sales engineer can complete this onsite meeting.');
+    error.statusCode = 403;
+    throw error;
+  }
+  const location = onsite ? normalizeCompletionLocation(completionData?.location) : null;
   const result = await pool.query(
     `UPDATE lead_followups
      SET status = 'Completed',
          completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+         completion_latitude = $3,
+         completion_longitude = $4,
+         completion_accuracy_m = $5,
+         location_captured_at = CASE WHEN $3::numeric IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND lead_id = $2
      RETURNING ${followupColumns('lead_followups')}`,
-    [followupId, lead.id],
+    [followupId, lead.id, location?.latitude ?? null, location?.longitude ?? null, location?.accuracy ?? null],
   );
   const followup = result.rows[0] || null;
   if (!followup) return null;
   await logLeadActivity(lead.id, {
-    activity_type: 'system',
-    content: `Follow-up completed: ${followup.followup_type} - ${followup.title}`,
+    activity_type: onsite ? 'meeting' : 'system',
+    content: `${onsite ? 'Onsite meeting completed with captured location' : 'Follow-up completed'}: ${followup.followup_type} - ${followup.title}`,
+    metadata: onsite ? {
+      followup_id: followup.id,
+      location: {
+        latitude: Number(followup.completion_latitude),
+        longitude: Number(followup.completion_longitude),
+        accuracy_m: Number(followup.completion_accuracy_m),
+        captured_at: followup.location_captured_at,
+      },
+    } : {},
   }, user);
   return followup;
 }
@@ -696,6 +759,10 @@ async function cancelLeadFollowup(leadId, followupId, user) {
     `UPDATE lead_followups
      SET status = 'Cancelled',
          completed_at = NULL,
+         completion_latitude = NULL,
+         completion_longitude = NULL,
+         completion_accuracy_m = NULL,
+         location_captured_at = NULL,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $1 AND lead_id = $2
      RETURNING ${followupColumns('lead_followups')}`,
@@ -765,7 +832,7 @@ async function createLead(leadData, user) {
     await client.query('BEGIN');
     customer = await selectedCustomerForLead(client, leadData.customer_id);
     owner = await resolveSalesOwner(leadData, user, client);
-    const ownedLeadData = leadDataForCustomer({ ...leadData, assigned_to: owner.name }, customer);
+    const ownedLeadData = leadDataForCustomer({ ...leadData, enquiry_date: leadData.enquiry_date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }), assigned_to: owner.name }, customer);
     await ensureLeadSourceAllowed(ownedLeadData.lead_source);
     await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
     const values = leadValues(ownedLeadData);

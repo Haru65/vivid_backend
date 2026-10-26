@@ -5,6 +5,7 @@ const CUSTOMER_COLUMNS = `
   id,
   company_name,
   gstin,
+  pan,
   city,
   company_type,
   industry,
@@ -13,8 +14,12 @@ const CUSTOMER_COLUMNS = `
   site_location,
   consultant,
   contact_person_name,
+  designation,
   contact_person_phone,
   contact_person_email,
+  alternate_contact_name,
+  alternate_contact_phone,
+  alternate_contact_email,
   billing_address,
   shipping_address,
   state,
@@ -29,6 +34,9 @@ const CUSTOMER_COLUMNS = `
   source_lead_id,
   created_by_user_id,
   created_by_name,
+  account_owner_user_id,
+  account_owner_name,
+  remarks,
   raw_data,
   country,
   district,
@@ -46,6 +54,7 @@ function isIndividualSales(user) {
 function canAccessOwnedCustomer(customer, user) {
   if (!isIndividualSales(user)) return true;
   return String(customer?.created_by_user_id || '') === String(user?.id || '')
+    || String(customer?.account_owner_user_id || '') === String(user?.id || '')
     || customer?.owns_linked_lead === true
     || String(customer?.sales_owner_id || '') === String(user?.id || '')
     || String(customer?.assigned_to || '').trim() === actorName(user);
@@ -53,7 +62,7 @@ function canAccessOwnedCustomer(customer, user) {
 
 async function customerForAccess(id, user) {
   const result = await pool.query(
-    `SELECT c.id, c.created_by_user_id,
+    `SELECT c.id, c.created_by_user_id, c.account_owner_user_id,
        EXISTS (
          SELECT 1 FROM leads owned
          WHERE owned.customer_id = c.id
@@ -115,6 +124,49 @@ function nullableGstin(value, field) {
     throw validationError(`${field} must be a valid 15-character GSTIN.`);
   }
   return normalized;
+}
+
+function nullablePan(value, field = 'PAN') {
+  const pan = nullableString(value, field, 10);
+  if (!pan) return null;
+  const normalized = pan.toUpperCase();
+  if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(normalized)) {
+    throw validationError(`${field} must be a valid 10-character PAN.`);
+  }
+  return normalized;
+}
+
+function nullableEmail(value, field) {
+  const email = nullableString(value, field, 255);
+  if (!email) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw validationError(`${field} must be valid.`);
+  return email.toLowerCase();
+}
+
+async function resolveAccountOwner(data, user, db, previous = null) {
+  const privileged = ['admin', 'sales_head'].includes(String(user?.role || '').toLowerCase());
+  if (!privileged) {
+    if (previous?.account_owner_user_id && data.account_owner_user_id
+      && String(previous.account_owner_user_id) !== String(data.account_owner_user_id)) {
+      const error = new Error('Only Admin and Sales Head can change the account owner.');
+      error.statusCode = 403;
+      throw error;
+    }
+    return previous?.account_owner_user_id
+      ? { id: Number(previous.account_owner_user_id), name: previous.account_owner_name }
+      : { id: Number(user?.id), name: actorName(user) };
+  }
+  const ownerId = Number(data.account_owner_user_id);
+  if (!Number.isInteger(ownerId) || ownerId <= 0) throw validationError('Select an account owner.');
+  const result = await db.query(
+    `SELECT id, first_name, last_name
+     FROM users
+     WHERE id = $1 AND is_active = TRUE
+       AND role IN ('salesperson', 'sales_engineer', 'presales')`,
+    [ownerId],
+  );
+  if (!result.rows[0]) throw validationError('Select an active sales account owner.');
+  return { id: Number(result.rows[0].id), name: [result.rows[0].first_name, result.rows[0].last_name].filter(Boolean).join(' ') };
 }
 
 function nullablePincode(value, field) {
@@ -199,10 +251,8 @@ function customerValues(customerData) {
   if (amcStartDate && amcEndDate && amcEndDate < amcStartDate) {
     throw validationError('AMC end date must be on or after the AMC start date.');
   }
-  const contactEmail = nullableString(customerData.contact_person_email, 'Contact person email', 255);
-  if (contactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(contactEmail)) {
-    throw validationError('Contact person email must be valid.');
-  }
+  const contactEmail = nullableEmail(customerData.contact_person_email, 'Primary contact email');
+  const alternateEmail = nullableEmail(customerData.alternate_contact_email, 'Alternate contact email');
 
   return [
     requiredString(customerData.company_name, 'Company name', 255),
@@ -231,6 +281,12 @@ function customerValues(customerData) {
     nullableString(customerData.district, 'District', 255),
     nullablePincode(customerData.pincode, 'PIN code'),
     nullableString(customerData.precise_location, 'Precise location', 5000),
+    nullablePan(customerData.pan),
+    nullableString(customerData.designation, 'Designation', 255),
+    nullableString(customerData.alternate_contact_name, 'Alternate contact name', 255),
+    nullablePhone(customerData.alternate_contact_phone, 'Alternate phone'),
+    alternateEmail,
+    nullableString(customerData.remarks, 'Remarks', 5000),
   ];
 }
 
@@ -252,6 +308,7 @@ async function searchCustomers(query) {
        c.id,
        c.company_name,
        c.gstin,
+       c.pan,
        c.city,
        c.industry,
        c.segment,
@@ -259,13 +316,23 @@ async function searchCustomers(query) {
        c.consultant,
        c.contact_person_name,
        c.contact_person_phone,
+       c.alternate_contact_name,
+       c.alternate_contact_phone,
+       c.alternate_contact_email,
+       c.account_owner_user_id,
+       c.account_owner_name,
        COALESCE(c.contact_person_email, c.raw_data->>'contact_person_email') AS contact_person_email
      FROM customers c
      WHERE $1 = ''
         OR c.company_name ILIKE $2
         OR COALESCE(c.gstin, '') ILIKE $2
+        OR COALESCE(c.pan, '') ILIKE $2
         OR COALESCE(c.city, '') ILIKE $2
         OR COALESCE(c.contact_person_name, '') ILIKE $2
+        OR COALESCE(c.alternate_contact_name, '') ILIKE $2
+        OR COALESCE(c.alternate_contact_phone, '') ILIKE $2
+        OR COALESCE(c.alternate_contact_email, '') ILIKE $2
+        OR COALESCE(c.account_owner_name, '') ILIKE $2
      ORDER BY
        CASE
          WHEN LOWER(c.company_name) = LOWER($1) THEN 0
@@ -323,8 +390,8 @@ async function quickCreateCustomer(customerData, user) {
       `INSERT INTO customers (
         company_name, gstin, city, contact_person_name, contact_person_phone,
         contact_person_email, amc_status, total_orders, lifetime_value, customer_since,
-        created_by_user_id, created_by_name
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'None', 0, 0, CURRENT_DATE, $7, $8)
+        created_by_user_id, created_by_name, account_owner_user_id, account_owner_name
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'None', 0, 0, CURRENT_DATE, $7, $8, $9, $10)
       RETURNING ${CUSTOMER_COLUMNS}`,
       [
         companyName,
@@ -335,6 +402,8 @@ async function quickCreateCustomer(customerData, user) {
         contactEmail,
         user?.id || null,
         actorName(user) || null,
+        isIndividualSales(user) ? user?.id || null : null,
+        isIndividualSales(user) ? actorName(user) || null : null,
       ],
     );
     await client.query('COMMIT');
@@ -357,6 +426,7 @@ async function createCustomer(customerData, user) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const owner = await resolveAccountOwner(customerData, user, client);
     await assertUniqueCustomer(client, values[0], values[1]);
     const result = await client.query(
       `INSERT INTO customers (
@@ -382,15 +452,23 @@ async function createCustomer(customerData, user) {
       lifetime_value,
       customer_since,
       raw_data,
-      created_by_user_id,
-      created_by_name,
       country,
       district,
       pincode,
-      precise_location
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21::date, CURRENT_DATE), $22, $27, $28, $23, $24, $25, $26)
+      precise_location,
+      pan,
+      designation,
+      alternate_contact_name,
+      alternate_contact_phone,
+      alternate_contact_email,
+      remarks,
+      created_by_user_id,
+      created_by_name,
+      account_owner_user_id,
+      account_owner_name
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21::date, CURRENT_DATE), $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36)
     RETURNING ${CUSTOMER_COLUMNS}`,
-      [...values, user?.id || null, actorName(user) || null],
+      [...values, user?.id || null, actorName(user) || null, owner.id, owner.name],
     );
     await client.query('COMMIT');
     return result.rows[0];
@@ -403,12 +481,13 @@ async function createCustomer(customerData, user) {
 }
 
 async function updateCustomer(id, customerData, user) {
-  const existing = await pool.query('SELECT id FROM customers WHERE id = $1', [id]);
+  const existing = await pool.query('SELECT id, account_owner_user_id, account_owner_name FROM customers WHERE id = $1', [id]);
   if (!existing.rows[0]) return null;
   const values = customerValues(customerData);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const owner = await resolveAccountOwner(customerData, user, client, existing.rows[0]);
     await assertUniqueCustomer(client, values[0], values[1], Number(id));
     const result = await client.query(
       `UPDATE customers
@@ -438,10 +517,18 @@ async function updateCustomer(id, customerData, user) {
          district = $24,
          pincode = $25,
          precise_location = $26,
+         pan = $27,
+         designation = $28,
+         alternate_contact_name = $29,
+         alternate_contact_phone = $30,
+         alternate_contact_email = $31,
+         remarks = $32,
+         account_owner_user_id = $33,
+         account_owner_name = $34,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $27
+     WHERE id = $35
      RETURNING ${CUSTOMER_COLUMNS}`,
-      [...values, id],
+      [...values, owner.id, owner.name, id],
     );
     await client.query('COMMIT');
     return result.rows[0] || null;
@@ -553,8 +640,10 @@ async function convertLeadToCustomer(leadId, user) {
         precise_location,
         amc_status,
         customer_since,
-        source_lead_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'India', $8, $9, $10, $11, $12, 'None', CURRENT_DATE, $13)
+        source_lead_id,
+        account_owner_user_id,
+        account_owner_name
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'India', $8, $9, $10, $11, $12, 'None', CURRENT_DATE, $13, $14, $15)
       RETURNING ${CUSTOMER_COLUMNS}`,
       [
         lead.company_name,
@@ -570,6 +659,8 @@ async function convertLeadToCustomer(leadId, user) {
         lead.billing_pincode || null,
         lead.precise_location || null,
         lead.id,
+        lead.sales_owner_id || user?.id || null,
+        lead.assigned_to || actorName(user) || null,
       ],
     );
 

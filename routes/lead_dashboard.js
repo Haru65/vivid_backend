@@ -106,7 +106,7 @@ router.put('/:leadId/followups/:followupId', async (req, res) => {
 
 router.post('/:leadId/followups/:followupId/complete', async (req, res) => {
   try {
-    const followup = await completeLeadFollowup(req.params.leadId, req.params.followupId, currentUser(req));
+    const followup = await completeLeadFollowup(req.params.leadId, req.params.followupId, req.body, currentUser(req));
     if (!followup) return res.status(404).json({ error: 'Follow-up not found' });
     res.json(followup);
   } catch (error) {
