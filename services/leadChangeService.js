@@ -1,5 +1,5 @@
 const pool = require('../config/db_connection');
-const { notifyUserId } = require('./notificationService');
+const { notifyRole, notifyUserId } = require('./notificationService');
 
 const LEAD_EDIT_FIELDS = [
   'company_name', 'contact_person_name', 'contact_person_email', 'contact_person_phone',
@@ -67,7 +67,7 @@ async function submitLeadChange(db, previous, proposed, user, reviewers = {}) {
   const after = leadSnapshot(proposed);
   const changes = changesBetween(before, after);
   if (!Object.keys(changes).length) return previous;
-  const pending = await db.query(`SELECT id FROM lead_change_requests WHERE lead_id = $1 AND status = 'pending'`, [previous.id]);
+  const pending = await db.query(`SELECT id FROM lead_change_requests WHERE lead_id = $1 AND status IN ('pending', 'pending_md_approval')`, [previous.id]);
   if (pending.rows.length) throw appError('This lead already has a pending change request. Wait for its review.', 409);
   const estimation = await db.query(
     `SELECT estimation_head_id FROM estimation_requests
@@ -104,6 +104,7 @@ async function listLeadChanges(user, db = pool) {
      LEFT JOIN users s ON s.id = r.sales_head_id
      LEFT JOIN users e ON e.id = r.estimation_head_id
      WHERE $1 = 'admin'
+       OR $1 = 'sales_head'
        OR ($1 = 'sales_engineer' AND r.requested_by_user_id = $2)
        OR ($1 = 'estimation_head' AND r.estimation_head_id = $2)
        OR ($1 = 'estimation_head' AND r.status = 'applied' AND EXISTS (
@@ -112,14 +113,14 @@ async function listLeadChanges(user, db = pool) {
        OR ($1 IN ('estimation_engineer', 'presales') AND r.status = 'applied' AND EXISTS (
          SELECT 1 FROM estimation_requests er WHERE er.lead_id = r.lead_id AND er.assigned_engineer_id = $2
        ))
-     ORDER BY (r.status = 'pending') DESC, r.created_at DESC, r.id DESC`,
+     ORDER BY (r.status IN ('pending', 'pending_md_approval')) DESC, r.created_at DESC, r.id DESC`,
     [user.role, user.id],
   );
   return result.rows;
 }
 
 async function reviewLeadChange(id, decision, comments, user, dependencies = {}) {
-  if (user.role !== 'estimation_head') throw appError('Only the assigned Estimation Head can review changes.', 403);
+  if (!['estimation_head', 'admin'].includes(user.role)) throw appError('Only the assigned Estimation Head or MD/admin can review changes.', 403);
   if (!['approve', 'reject'].includes(decision)) throw appError('Invalid review decision.');
   const reason = String(comments || '').trim().slice(0, 2000);
   if (decision === 'reject' && !reason) throw appError('A rejection reason is required.');
@@ -131,29 +132,38 @@ async function reviewLeadChange(id, decision, comments, user, dependencies = {})
     const result = await client.query('SELECT * FROM lead_change_requests WHERE id = $1 FOR UPDATE', [id]);
     const request = result.rows[0];
     if (!request) throw appError('Lead change request not found.', 404);
-    if (String(request.estimation_head_id) !== String(user.id)
-      || String(request.requested_by_user_id) === String(user.id)) throw appError('This request is not assigned to you.', 403);
-    if (request.status !== 'pending') throw appError('This request has already been resolved.', 409);
-    if (request.estimation_approved_at) throw appError('You have already approved this request.', 409);
+    const mdDecision = user.role === 'admin' && request.status === 'pending_md_approval';
+    const estimationDecision = user.role === 'estimation_head'
+      && request.status === 'pending'
+      && String(request.estimation_head_id) === String(user.id)
+      && String(request.requested_by_user_id) !== String(user.id);
+    if (!mdDecision && !estimationDecision) {
+      if (!['pending', 'pending_md_approval'].includes(request.status)) throw appError('This request has already been resolved.', 409);
+      throw appError('This request is not assigned to you.', 403);
+    }
+    if (estimationDecision && request.estimation_approved_at) throw appError('You have already approved this request.', 409);
 
     if (decision === 'reject') {
-      const rejected = await client.query(
-        `UPDATE lead_change_requests SET status = 'rejected', rejected_by_user_id = $2, rejection_reason = $3, resolved_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`,
-        [id, user.id, reason],
-      );
+      const rejected = mdDecision
+        ? await client.query(`UPDATE lead_change_requests SET status = 'rejected', rejected_by_user_id = $2,
+          rejection_reason = $3, md_decided_by_user_id = $2, md_decided_by_name = $4,
+          md_decided_at = CURRENT_TIMESTAMP, md_comments = $3, resolved_at = CURRENT_TIMESTAMP
+          WHERE id = $1 RETURNING *`, [id, user.id, reason, user.name])
+        : await client.query(`UPDATE lead_change_requests SET status = 'rejected', rejected_by_user_id = $2,
+          rejection_reason = $3, resolved_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`, [id, user.id, reason]);
       await writeActivity(client, request.lead_id, user, 'approval', `Lead change #${id} rejected by ${user.name}: ${reason}`, { event: 'lead_change_rejected', request_id: request.id, reason });
       await notifyUserId(request.requested_by_user_id, { title: 'Lead change rejected', body: `${request.company_name}: ${reason}`, category: 'lead_change', link_type: 'lead_change_request', link_id: request.id }, client);
       await client.query('COMMIT');
       return rejected.rows[0];
     }
 
-    const approved = await client.query(
-      `UPDATE lead_change_requests SET estimation_approved_at = CURRENT_TIMESTAMP, estimation_comments = $2 WHERE id = $1 RETURNING *`,
-      [id, reason],
-    );
+    const approved = mdDecision
+      ? await client.query(`UPDATE lead_change_requests SET md_decided_by_user_id = $2, md_decided_by_name = $3, md_decided_at = CURRENT_TIMESTAMP, md_comments = $4 WHERE id = $1 RETURNING *`, [id, user.id, user.name, reason])
+      : await client.query(`UPDATE lead_change_requests SET estimation_approved_at = CURRENT_TIMESTAMP, estimation_comments = $2 WHERE id = $1 RETURNING *`, [id, reason]);
     const next = approved.rows[0];
-    await writeActivity(client, request.lead_id, user, 'approval', `Lead change #${id} approved by ${user.name} (Estimation Head).`, { event: 'lead_change_approved', request_id: request.id });
-    if (next.estimation_approved_at) {
+    const approverLabel = mdDecision ? 'MD/admin' : 'Estimation Head';
+    await writeActivity(client, request.lead_id, user, 'approval', `Lead change #${id} approved by ${user.name} (${approverLabel}).`, { event: 'lead_change_approved', request_id: request.id, approver_role: user.role });
+    if (next.estimation_approved_at || next.md_decided_at) {
       const leadResult = await client.query('SELECT * FROM leads WHERE id = $1 FOR UPDATE', [request.lead_id]);
       const lead = leadResult.rows[0];
       const stale = !lead || Object.keys(changesBetween(request.before_snapshot, leadSnapshot(lead))).length > 0;
@@ -172,7 +182,7 @@ async function reviewLeadChange(id, decision, comments, user, dependencies = {})
         return `${field.replace(/_/g, ' ')}: ${render(change.before)} → ${render(change.after)}`;
       }).join('; ');
       await writeActivity(client, request.lead_id, user, 'system',
-        `Lead change #${id} applied after Estimation Head approval. ${detail}`,
+        `Lead change #${id} applied after ${approverLabel} approval. ${detail}`,
         { event: 'lead_change_applied', request_id: request.id, changes: request.changes, requested_by_user_id: request.requested_by_user_id, estimation_head_id: request.estimation_head_id });
       const applied = await client.query(`UPDATE lead_change_requests SET status = 'applied', resolved_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`, [id]);
       const assignments = await client.query(
@@ -182,9 +192,9 @@ async function reviewLeadChange(id, decision, comments, user, dependencies = {})
       const recipients = new Set([request.estimation_head_id, ...assignments.rows.flatMap((row) => [row.assigned_engineer_id, row.estimation_head_id])].filter(Boolean).map(String));
       const fields = Object.keys(request.changes).map((field) => field.replace(/_/g, ' ')).join(', ');
       for (const recipient of recipients) {
-        await notifyUserId(recipient, { title: 'Approved lead changes applied', body: `${request.company_name}: ${fields}. Approved by the Estimation Head.`, category: 'lead', link_type: 'lead_change_request', link_id: request.id, metadata: { changes: request.changes, lead_id: request.lead_id } }, client);
+        await notifyUserId(recipient, { title: 'Approved lead changes applied', body: `${request.company_name}: ${fields}. Approved by ${approverLabel}.`, category: 'lead', link_type: 'lead_change_request', link_id: request.id, metadata: { changes: request.changes, lead_id: request.lead_id } }, client);
       }
-      await notifyUserId(request.requested_by_user_id, { title: 'Your lead changes were approved', body: `The Estimation Head approved your changes to ${request.company_name}. The lead is updated.`, category: 'lead_change', link_type: 'lead_change_request', link_id: request.id }, client);
+      await notifyUserId(request.requested_by_user_id, { title: 'Your lead changes were approved', body: `${approverLabel} approved your changes to ${request.company_name}. The lead is updated.`, category: 'lead_change', link_type: 'lead_change_request', link_id: request.id }, client);
       await client.query('COMMIT');
       return applied.rows[0];
     }
@@ -198,4 +208,33 @@ async function reviewLeadChange(id, decision, comments, user, dependencies = {})
   }
 }
 
-module.exports = { LEAD_EDIT_FIELDS, leadSnapshot, changesBetween, submitLeadChange, listLeadChanges, reviewLeadChange };
+async function requestLeadChangeMdApproval(id, comments, user) {
+  if (user.role !== 'estimation_head') throw appError('Only the assigned Estimation Head can request MD approval.', 403);
+  const reason = String(comments || '').trim().slice(0, 2000);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query('SELECT * FROM lead_change_requests WHERE id = $1 FOR UPDATE', [id]);
+    const request = result.rows[0];
+    if (!request) throw appError('Lead change request not found.', 404);
+    if (request.status !== 'pending') throw appError('Only a pending change request can be sent to MD.', 409);
+    if (String(request.estimation_head_id) !== String(user.id) || String(request.requested_by_user_id) === String(user.id)) {
+      throw appError('This request is not assigned to you.', 403);
+    }
+    const updated = await client.query(
+      `UPDATE lead_change_requests SET status = 'pending_md_approval', md_approval_requested_by_user_id = $2,
+       md_approval_requested_by_name = $3, md_approval_requested_at = CURRENT_TIMESTAMP,
+       estimation_comments = $4 WHERE id = $1 RETURNING *`,
+      [id, user.id, user.name, reason],
+    );
+    await writeActivity(client, request.lead_id, user, 'approval_requested', `Lead change #${id} sent to MD/admin for approval.`, { event: 'lead_change_md_requested', request_id: request.id });
+    await notifyRole('admin', { title: 'Lead change requires MD approval', body: `${user.name} escalated changes for ${request.company_name}.`, category: 'lead_change', link_type: 'lead_change_request', link_id: request.id }, client);
+    await client.query('COMMIT');
+    return updated.rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally { client.release(); }
+}
+
+module.exports = { LEAD_EDIT_FIELDS, leadSnapshot, changesBetween, submitLeadChange, listLeadChanges, reviewLeadChange, requestLeadChangeMdApproval };

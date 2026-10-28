@@ -1,6 +1,6 @@
 const express = require('express');
 const { requireRoles } = require('../middleware/auth');
-const { listLeadChanges, reviewLeadChange } = require('../services/leadChangeService');
+const { listLeadChanges, reviewLeadChange, requestLeadChangeMdApproval } = require('../services/leadChangeService');
 
 const router = express.Router();
 router.use(requireRoles('admin', 'sales_head', 'estimation_head', 'sales_engineer', 'estimation_engineer', 'presales'));
@@ -15,7 +15,17 @@ router.get('/', async (req, res) => {
   catch (error) { handleError(res, error); }
 });
 
-router.post('/:id/:decision', requireRoles('sales_head', 'estimation_head'), async (req, res) => {
+router.post('/:id/request-md', requireRoles('estimation_head'), async (req, res) => {
+  try { res.json(await requestLeadChangeMdApproval(req.params.id, req.body.comments, req.user)); }
+  catch (error) { handleError(res, error); }
+});
+
+router.post('/:id/md/:decision', requireRoles('admin'), async (req, res) => {
+  try { res.json(await reviewLeadChange(req.params.id, req.params.decision, req.body.comments, req.user)); }
+  catch (error) { handleError(res, error); }
+});
+
+router.post('/:id/:decision', requireRoles('estimation_head'), async (req, res) => {
   try { res.json(await reviewLeadChange(req.params.id, req.params.decision, req.body.comments, req.user)); }
   catch (error) { handleError(res, error); }
 });

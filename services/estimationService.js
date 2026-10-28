@@ -111,7 +111,7 @@ const SELECT_REQUEST = `
 
 function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
     WHEN 'Vivid Approved' THEN 1
-    WHEN 'OEM' THEN 2
+    WHEN 'OEM Approved' THEN 2
     ELSE 3
   END, er.updated_at DESC, er.id DESC`) {
   return `
@@ -141,12 +141,41 @@ function canViewRequest(user, request) {
   return false;
 }
 
+function scopeRequestForPoAccess(request, user) {
+  if (ESTIMATION_ROLES.has(user?.role)) return request;
+  return {
+    ...request,
+    po_estimation_data: null,
+    po_estimation_filled_at: null,
+    po_head_approved_at: null,
+  };
+}
+
+function scopePoSheetForUser(sheet, user) {
+  if (ESTIMATION_ROLES.has(user?.role)) return sheet;
+  return {
+    ...sheet,
+    estimation_data: null,
+    estimation_filled_by_user_id: null,
+    estimation_filled_by_name: null,
+    estimation_filled_at: null,
+    head_approved_by_user_id: null,
+    head_approved_by_name: null,
+    head_approved_at: null,
+    changes_requested_by_user_id: null,
+    changes_requested_by_name: null,
+    changes_requested_at: null,
+    changes_requested_reason: null,
+    ready_for_erp_at: null,
+  };
+}
+
 async function getRequest(id, user, client = pool) {
   const result = await client.query(requestQuery('WHERE er.id = $1'), [id]);
   const request = result.rows[0];
   if (!request) throw appError('Estimation request not found.', 404);
   if (!canViewRequest(user, request)) throw appError('You cannot view this estimation request.', 403);
-  return request;
+  return scopeRequestForPoAccess(request, user);
 }
 
 async function listEstimationRequests(user) {
@@ -159,7 +188,7 @@ async function listEstimationRequests(user) {
   } else {
     result = await pool.query(requestQuery('WHERE er.requested_by_name = $1 OR er.sales_owner_name = $1 OR er.sales_owner_id = $2'), [actorName(user), user?.id || null]);
   }
-  return result.rows;
+  return result.rows.map((request) => scopeRequestForPoAccess(request, user));
 }
 
 async function updateEnquiryState(id, data, user) {
@@ -1122,7 +1151,7 @@ async function getPoSheet(id, user) {
   const request = await getRequest(id, user);
   if (!request.po_closure_sheet_id) throw appError('PO sheet not found.', 404);
   const result = await pool.query(`SELECT * FROM po_closure_sheets WHERE id = $1`, [request.po_closure_sheet_id]);
-  return result.rows[0];
+  return scopePoSheetForUser(result.rows[0], user);
 }
 
 function pdfText(value, fallback = '') {
@@ -1147,6 +1176,18 @@ function poAmount(value, fallback = '-') {
   if (/^(?:na|n\/a|-|customer scope|vivid scope)$/i.test(raw)) return raw;
   const numeric = Number(raw.replace(/[^0-9.-]/g, ''));
   return Number.isFinite(numeric) ? `Rs. ${numeric.toLocaleString('en-IN')}` : raw;
+}
+
+function poPercent(value, fallback = '-') {
+  const raw = pdfText(value);
+  if (!raw) return fallback;
+  return raw.endsWith('%') ? raw : `${raw}%`;
+}
+
+function poUnit(value, unit, fallback = '') {
+  const raw = pdfText(value);
+  if (!raw) return fallback;
+  return /^\d+(?:\.\d+)?$/.test(raw) ? `${raw} ${unit}` : raw;
 }
 
 function safePdfFilename(value) {
@@ -1294,20 +1335,21 @@ async function buildPoFrontSheetPdf(request, sheet) {
     { sr: '1', label: 'LOI / PO', guideline: 'Received/Not Received/Email or Verbal Confirmation', value: sales.loi_po_status, height: 10.5 },
     { sr: '2', label: 'Drawing Submission', guideline: 'Approx 7 Days after receipt of PO/LOI', value: sales.drawing_submission, height: 10.5 },
     { sr: '3', label: 'Payment Terms', guideline: '', value: sales.payment_terms, height: 10.5 },
-    { sr: 'a.', label: 'Advance %', guideline: 'Min 10% advance', value: sales.advance_percent, height: 10.5 },
-    { sr: 'b.', label: 'ABG to be given for advance', guideline: 'Required/Not Required in %', value: sales.abg_advance, height: 10.5 },
-    { sr: 'c.', label: 'Balance', guideline: 'Proforma Invoice /60 days LC/PDC /VFS/OPEN', value: sales.balance_terms, height: 21 },
-    { sr: 'd.', label: 'Warranty', guideline: '12 / 24 / 30 Months From Supply', value: sales.warranty, height: 15 },
-    { sr: 'e.', label: 'PBG/Corporate Guarantee', guideline: 'Required/Not Required in %', value: sales.pbg_corporate_guarantee, height: 10.5 },
-    { sr: '4', label: 'Delivery Time Commited', guideline: 'Standard 6 to 8 weeks FROM DRAWING APPROVAL', value: sales.delivery_time, height: 13 },
+    { sr: 'a.', label: 'Advance %', guideline: 'Min 10% advance', value: poPercent(sales.advance_percent, ''), height: 10.5 },
+    { sr: 'b.', label: 'ABG to be given for advance', guideline: 'YES / NO', value: sales.abg_advance, height: 10.5 },
+    { sr: 'c.', label: 'Balance', guideline: 'Proforma Invoice before dispatch / 60 days LC/PDC before delivery', value: sales.balance_terms, height: 13 },
+    { sr: 'd.', label: 'Credit Days', guideline: '', value: poUnit(sales.credit_days, 'Days'), height: 10.5 },
+    { sr: 'd.', label: 'Warranty', guideline: 'Months from supply', value: poUnit(sales.warranty, 'Months'), height: 10.5 },
+    { sr: 'e.', label: 'PBG/Corporate Guarantee', guideline: 'YES / NO', value: sales.pbg_corporate_guarantee, height: 10.5 },
+    { sr: '4', label: 'Delivery Time Committed', guideline: 'Standard 12 to 13 weeks FROM DRAWING APPROVAL', value: poUnit(sales.delivery_time, 'Weeks'), height: 13 },
     { sr: '5', label: 'Commissioning Support', guideline: 'For HT PO value above 12L and LT PO above 20 and within 100 Kms of Pune or Mumbai will be free supervision only; all other support is chargeable.', value: sales.commissioning_support, height: 26 },
     { sr: '6', label: 'Commissioning Support in Rs.', guideline: 'If above criteria are not fulfilled mention the amount in Rs.', value: poAmount(sales.commissioning_support_rs, ''), height: 12 },
-    { sr: '7', label: 'Taxes & Duties', guideline: 'a) 18% GST / 0.1% / Export / SEZ', value: sales.taxes_duties, height: 11 },
+    { sr: '7', label: 'Taxes & Duties', guideline: '18% GST / 0.1% / Export / SEZ', value: poPercent(sales.taxes_duties, ''), height: 11 },
     { sr: '8', label: 'Transportation', guideline: 'Customer Scope / Vivid Scope (Transportation Value in Rs. Considered)', value: poAmount(sales.transportation, ''), height: 13 },
     { sr: '9', label: 'Customer / Consultant Liaisoning', guideline: 'To be Considered in Rs.', value: poAmount(sales.liaisoning, ''), height: 11 },
-    { sr: '10', label: 'Special Packing Charges if required', guideline: 'If special, to be Considered in Rs.', value: poAmount(sales.packing_charges, ''), height: 11 },
-    { sr: '11', label: 'Unloading and Installation', guideline: 'Specify', value: sales.unloading_installation, height: 11 },
-    { sr: '12', label: 'Finance Charges', guideline: 'Hundi / LC / Above 30 days', value: poAmount(sales.finance_charges, ''), height: 11 },
+    { sr: '10', label: 'Special Packing Charges if required', guideline: '', value: sales.packing_type, height: 11 },
+    { sr: '11', label: 'Special Packing Charges', guideline: 'To be considered in Rs.', value: poAmount(sales.packing_charges, ''), height: 11 },
+    { sr: '12', label: 'Unloading and Installation', guideline: 'To be considered in Rs.', value: poAmount(sales.unloading_installation, ''), height: 11 },
     { sr: '13', label: 'Any Special Payment Terms / Note', guideline: '', value: sales.special_note, height: 27 },
   ];
   salesRows.forEach((item) => row(
@@ -1394,6 +1436,7 @@ async function buildPoFrontSheetPdf(request, sheet) {
 }
 
 async function generatePoSheetPdf(id, user) {
+  requireEstimation(user);
   const request = await getRequest(id, user);
   const sheet = await getPoSheet(id, user);
   const poNumber = sheet.sales_data?.po_number || autoPoNumber(request);

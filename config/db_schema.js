@@ -19,7 +19,7 @@ async function createLeadSchema() {
       enquiry_state VARCHAR(20) NOT NULL DEFAULT 'Purchase'
         CHECK (enquiry_state IN ('Purchase', 'Tender', 'Budget')),
       sales_approval_status VARCHAR(30) NOT NULL DEFAULT 'Vivid Not Approved'
-        CHECK (sales_approval_status IN ('Vivid Approved', 'Vivid Not Approved', 'OEM')),
+        CHECK (sales_approval_status IN ('Vivid Approved', 'Vivid Not Approved', 'OEM Approved')),
       priority VARCHAR(20) NOT NULL DEFAULT 'Medium'
         CHECK (priority IN ('Low', 'Medium', 'High', 'Urgent')),
       customer_id INTEGER,
@@ -107,7 +107,7 @@ async function createLeadSchema() {
     DROP CONSTRAINT IF EXISTS leads_sales_approval_status_check;
     UPDATE leads
     SET sales_approval_status = CASE
-      WHEN sales_approval_status = 'ABB Approval' THEN 'OEM'
+      WHEN sales_approval_status IN ('ABB Approval', 'OEM') THEN 'OEM Approved'
       WHEN sales_approval_status = 'Not Vivid Approved' THEN 'Vivid Not Approved'
       ELSE sales_approval_status
     END;
@@ -115,7 +115,7 @@ async function createLeadSchema() {
     ALTER COLUMN sales_approval_status SET DEFAULT 'Vivid Not Approved';
     ALTER TABLE leads
     ADD CONSTRAINT leads_sales_approval_status_check
-    CHECK (sales_approval_status IN ('Vivid Approved', 'Vivid Not Approved', 'OEM'));
+    CHECK (sales_approval_status IN ('Vivid Approved', 'Vivid Not Approved', 'OEM Approved'));
   `);
 
   await pool.query(`
@@ -304,6 +304,7 @@ async function createCustomerSchema() {
       account_owner_user_id BIGINT,
       account_owner_name VARCHAR(255),
       remarks TEXT,
+      region VARCHAR(100),
       raw_data JSONB
     );
   `);
@@ -335,7 +336,8 @@ async function createCustomerSchema() {
     ADD COLUMN IF NOT EXISTS created_by_name VARCHAR(255),
     ADD COLUMN IF NOT EXISTS account_owner_user_id BIGINT,
     ADD COLUMN IF NOT EXISTS account_owner_name VARCHAR(255),
-    ADD COLUMN IF NOT EXISTS remarks TEXT;
+    ADD COLUMN IF NOT EXISTS remarks TEXT,
+    ADD COLUMN IF NOT EXISTS region VARCHAR(100);
   `);
 
   await pool.query(`
@@ -910,6 +912,8 @@ async function createEstimationRequestSchema() {
     DROP CONSTRAINT IF EXISTS estimation_requests_status_check;
   `);
 
+  await pool.query(`UPDATE estimation_requests SET status = 'submitted_for_review' WHERE status = 'pending_md_approval';`);
+
   await pool.query(`
     ALTER TABLE estimation_requests
     ADD CONSTRAINT estimation_requests_status_check
@@ -1137,24 +1141,46 @@ async function createLeadChangeRequestSchema(db = pool) {
       before_snapshot JSONB NOT NULL,
       proposed_snapshot JSONB NOT NULL,
       changes JSONB NOT NULL,
-      status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'rejected', 'conflict')),
+      status VARCHAR(30) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'pending_md_approval', 'applied', 'rejected', 'conflict')),
       sales_approved_at TIMESTAMPTZ,
       estimation_approved_at TIMESTAMPTZ,
       sales_comments TEXT,
       estimation_comments TEXT,
       rejected_by_user_id BIGINT,
       rejection_reason TEXT,
+      md_approval_requested_by_user_id BIGINT,
+      md_approval_requested_by_name VARCHAR(255),
+      md_approval_requested_at TIMESTAMPTZ,
+      md_decided_by_user_id BIGINT,
+      md_decided_by_name VARCHAR(255),
+      md_decided_at TIMESTAMPTZ,
+      md_comments TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       resolved_at TIMESTAMPTZ,
       CHECK (sales_head_id <> estimation_head_id),
       CHECK (requested_by_user_id <> sales_head_id AND requested_by_user_id <> estimation_head_id)
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS lead_change_requests_pending_lead_idx
-      ON lead_change_requests (lead_id) WHERE status = 'pending';
     CREATE INDEX IF NOT EXISTS lead_change_requests_review_idx
       ON lead_change_requests (sales_head_id, estimation_head_id, status, created_at DESC);
   `);
-  await db.query(`ALTER TABLE lead_change_requests ALTER COLUMN sales_head_id DROP NOT NULL;`);
+  await db.query(`
+    ALTER TABLE lead_change_requests ALTER COLUMN sales_head_id DROP NOT NULL;
+    ALTER TABLE lead_change_requests ALTER COLUMN status TYPE VARCHAR(30);
+    ALTER TABLE lead_change_requests DROP CONSTRAINT IF EXISTS lead_change_requests_status_check;
+    ALTER TABLE lead_change_requests ADD CONSTRAINT lead_change_requests_status_check
+      CHECK (status IN ('pending', 'pending_md_approval', 'applied', 'rejected', 'conflict'));
+    ALTER TABLE lead_change_requests
+      ADD COLUMN IF NOT EXISTS md_approval_requested_by_user_id BIGINT,
+      ADD COLUMN IF NOT EXISTS md_approval_requested_by_name VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS md_approval_requested_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS md_decided_by_user_id BIGINT,
+      ADD COLUMN IF NOT EXISTS md_decided_by_name VARCHAR(255),
+      ADD COLUMN IF NOT EXISTS md_decided_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS md_comments TEXT;
+    DROP INDEX IF EXISTS lead_change_requests_pending_lead_idx;
+    CREATE UNIQUE INDEX lead_change_requests_pending_lead_idx
+      ON lead_change_requests (lead_id) WHERE status IN ('pending', 'pending_md_approval');
+  `);
 }
 
 async function createSchemas() {

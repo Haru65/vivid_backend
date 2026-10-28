@@ -41,7 +41,8 @@ const CUSTOMER_COLUMNS = `
   country,
   district,
   pincode,
-  precise_location
+  precise_location,
+  region
 `;
 function actorName(user) {
   return String(user?.name || '').trim();
@@ -287,6 +288,7 @@ function customerValues(customerData) {
     nullablePhone(customerData.alternate_contact_phone, 'Alternate phone'),
     alternateEmail,
     nullableString(customerData.remarks, 'Remarks', 5000),
+    nullableString(customerData.region, 'Region', 100),
   ];
 }
 
@@ -462,11 +464,12 @@ async function createCustomer(customerData, user) {
       alternate_contact_phone,
       alternate_contact_email,
       remarks,
+      region,
       created_by_user_id,
       created_by_name,
       account_owner_user_id,
       account_owner_name
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21::date, CURRENT_DATE), $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36)
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21::date, CURRENT_DATE), $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
     RETURNING ${CUSTOMER_COLUMNS}`,
       [...values, user?.id || null, actorName(user) || null, owner.id, owner.name],
     );
@@ -523,10 +526,11 @@ async function updateCustomer(id, customerData, user) {
          alternate_contact_phone = $30,
          alternate_contact_email = $31,
          remarks = $32,
-         account_owner_user_id = $33,
-         account_owner_name = $34,
+         region = $33,
+         account_owner_user_id = $34,
+         account_owner_name = $35,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $35
+     WHERE id = $36
      RETURNING ${CUSTOMER_COLUMNS}`,
       [...values, owner.id, owner.name, id],
     );
