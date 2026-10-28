@@ -10,6 +10,7 @@ const {
   cancelLeadFollowup,
   createLead,
   updateLead,
+  setLeadWorkflowState,
   deleteLead,
   acceptProposal,
 } = require('../controller/leads');
@@ -139,6 +140,14 @@ router.put('/update-lead/:id', async (req, res) => {
     res.json(lead);
   } catch (error) {
     handleActivityError(res, 'Unable to update lead', error);
+  }
+});
+
+router.post('/:id/workflow-action', async (req, res) => {
+  try {
+    res.json(await setLeadWorkflowState(req.params.id, req.body, currentUser(req)));
+  } catch (error) {
+    handleActivityError(res, 'Unable to update lead workflow', error);
   }
 });
 

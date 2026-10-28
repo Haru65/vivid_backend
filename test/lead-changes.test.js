@@ -12,7 +12,7 @@ function database() {
   const after = leadSnapshot({ ...baseLead, project_name: 'Revised project' });
   let state = {
     lead: structuredClone(baseLead),
-    request: { id: 9, lead_id: 7, company_name: 'Acme', requested_by_user_id: 1, requested_by_name: engineer.name, sales_head_id: 2, estimation_head_id: 3, status: 'pending', before_snapshot: before, proposed_snapshot: after, changes: changesBetween(before, after), sales_approved_at: null, estimation_approved_at: null },
+    request: { id: 9, lead_id: 7, company_name: 'Acme', requested_by_user_id: 1, requested_by_name: engineer.name, sales_head_id: null, estimation_head_id: 3, status: 'pending', before_snapshot: before, proposed_snapshot: after, changes: changesBetween(before, after), sales_approved_at: null, estimation_approved_at: null },
     activities: [], notifications: [], applications: 0,
   };
   let backup;
@@ -44,7 +44,7 @@ function database() {
         return { rows: [] };
       }
       if (/INSERT INTO lead_change_requests/.test(sql)) {
-        state.request = { id: 9, lead_id: values[0], company_name: values[1], requested_by_user_id: values[2], requested_by_name: values[3], sales_head_id: values[4], estimation_head_id: values[5], before_snapshot: JSON.parse(values[6]), proposed_snapshot: JSON.parse(values[7]), changes: JSON.parse(values[8]), status: 'pending' };
+        state.request = { id: 9, lead_id: values[0], company_name: values[1], requested_by_user_id: values[2], requested_by_name: values[3], sales_head_id: null, estimation_head_id: values[4], before_snapshot: JSON.parse(values[5]), proposed_snapshot: JSON.parse(values[6]), changes: JSON.parse(values[7]), status: 'pending' };
         return { rows: [structuredClone(state.request)] };
       }
       if (/UPDATE lead_change_requests/.test(sql)) {
@@ -84,14 +84,14 @@ test('lead snapshots compare dates, numeric IDs and nested JSON consistently', (
   assert.deepEqual(changesBetween(before, after), {});
 });
 
-test('submission stores proposed values, keeps lead unchanged and notifies exactly the two selected heads', async () => {
+test('submission stores proposed values, keeps lead unchanged and notifies only the Estimation Head', async () => {
   const db = database();
   db.state.request = null;
-  const result = await submitLeadChange(db, baseLead, { ...baseLead, project_name: 'Revised project' }, engineer, { sales_head_id: 2, estimation_head_id: 3 });
+  const result = await submitLeadChange(db, baseLead, { ...baseLead, project_name: 'Revised project' }, engineer, { estimation_head_id: 3 });
   assert.equal(result.approval_required, true);
   assert.equal(db.state.lead.project_name, 'Original project');
   assert.equal(db.state.request.changes.project_name.after, 'Revised project');
-  assert.deepEqual(db.state.notifications.map((item) => item.recipient), ['2', '3']);
+  assert.deepEqual(db.state.notifications.map((item) => item.recipient), ['3']);
   assert.equal(db.state.activities[0].type, 'approval_requested');
 });
 
@@ -104,51 +104,43 @@ test('a pending request prevents a second request for the same lead', async () =
 test('submission rejects an unrelated reviewer instead of broadcasting', async () => {
   const db = database();
   db.state.request = null;
-  await assert.rejects(submitLeadChange(db, baseLead, { ...baseLead, priority: 'High' }, engineer, { sales_head_id: 99, estimation_head_id: 3 }), /Select an active Sales Head/);
+  await assert.rejects(submitLeadChange(db, baseLead, { ...baseLead, priority: 'High' }, engineer, { estimation_head_id: 99 }), /Select an active Estimation Head/);
   assert.equal(db.state.request, null);
   assert.equal(db.state.notifications.length, 0);
 });
 
-for (const [first, second] of [[salesHead, estimationHead], [estimationHead, salesHead]]) {
-  test(`both heads required, with ${first.role} reviewing first`, async () => {
-    const db = database();
-    const deps = dependencies(db);
-    const waiting = await reviewLeadChange(9, 'approve', 'Reviewed', first, deps);
-    assert.equal(waiting.status, 'pending');
-    assert.equal(db.state.lead.project_name, 'Original project');
-    assert.equal(db.state.applications, 0);
-    assert.equal(db.state.notifications.length, 0);
-    const applied = await reviewLeadChange(9, 'approve', 'Confirmed', second, deps);
-    assert.equal(applied.status, 'applied');
-    assert.equal(db.state.lead.project_name, 'Revised project');
-    assert.equal(db.state.applications, 1);
-    assert.deepEqual(db.state.notifications.map((item) => item.recipient).sort(), ['1', '3', '4']);
-    assert.ok(db.state.activities.some((item) => item.metadata.event === 'lead_change_applied' && item.content.includes('Original project → Revised project')));
-    await assert.rejects(reviewLeadChange(9, 'approve', '', second, deps), { statusCode: 409 });
-    assert.equal(db.state.applications, 1);
-  });
-}
+test('Estimation Head approval applies the change immediately', async () => {
+  const db = database();
+  const deps = dependencies(db);
+  const applied = await reviewLeadChange(9, 'approve', 'Confirmed', estimationHead, deps);
+  assert.equal(applied.status, 'applied');
+  assert.equal(db.state.lead.project_name, 'Revised project');
+  assert.equal(db.state.applications, 1);
+  assert.deepEqual(db.state.notifications.map((item) => item.recipient).sort(), ['1', '3', '4']);
+  assert.ok(db.state.activities.some((item) => item.metadata.event === 'lead_change_applied' && item.content.includes('Original project → Revised project')));
+  await assert.rejects(reviewLeadChange(9, 'approve', '', estimationHead, deps), { statusCode: 409 });
+  assert.equal(db.state.applications, 1);
+});
 
 test('unassigned heads, self-approval and administrator override cannot approve a request', async () => {
   const db = database();
   const deps = dependencies(db);
-  for (const user of [{ ...salesHead, id: 99 }, engineer, { id: 10, name: 'Admin', role: 'admin' }]) {
+  for (const user of [salesHead, { ...estimationHead, id: 99 }, engineer, { id: 10, name: 'Admin', role: 'admin' }]) {
     await assert.rejects(reviewLeadChange(9, 'approve', '', user, deps), { statusCode: 403 });
   }
   assert.equal(db.state.applications, 0);
 });
 
-test('one head cannot count as both approvals or approve twice', async () => {
+test('Estimation Head cannot approve the same request twice', async () => {
   const db = database();
-  await reviewLeadChange(9, 'approve', '', salesHead, dependencies(db));
-  await assert.rejects(reviewLeadChange(9, 'approve', '', salesHead, dependencies(db)), { statusCode: 409 });
-  assert.equal(db.state.applications, 0);
+  await reviewLeadChange(9, 'approve', '', estimationHead, dependencies(db));
+  await assert.rejects(reviewLeadChange(9, 'approve', '', estimationHead, dependencies(db)), { statusCode: 409 });
+  assert.equal(db.state.applications, 1);
 });
 
 test('rejection preserves the lead and requires a reason', async () => {
   const db = database();
-  await assert.rejects(reviewLeadChange(9, 'reject', ' ', salesHead, dependencies(db)), /rejection reason/);
-  await reviewLeadChange(9, 'approve', '', salesHead, dependencies(db));
+  await assert.rejects(reviewLeadChange(9, 'reject', ' ', estimationHead, dependencies(db)), /rejection reason/);
   const rejected = await reviewLeadChange(9, 'reject', 'Incorrect specification', estimationHead, dependencies(db));
   assert.equal(rejected.status, 'rejected');
   assert.equal(db.state.lead.project_name, 'Original project');
@@ -157,7 +149,6 @@ test('rejection preserves the lead and requires a reason', async () => {
 
 test('a stale lead is never overwritten by approved values', async () => {
   const db = database();
-  await reviewLeadChange(9, 'approve', '', salesHead, dependencies(db));
   db.state.lead.project_name = 'Admin revision';
   const conflict = await reviewLeadChange(9, 'approve', '', estimationHead, dependencies(db));
   assert.equal(conflict.status, 'conflict');
@@ -167,7 +158,6 @@ test('a stale lead is never overwritten by approved values', async () => {
 
 test('application failure rolls back the last vote, lead and audit entries together', async () => {
   const db = database();
-  await reviewLeadChange(9, 'approve', '', salesHead, dependencies(db));
   const before = structuredClone(db.state);
   await assert.rejects(reviewLeadChange(9, 'approve', '', estimationHead, dependencies(db, { failApply: true })), /Lead update failed/);
   assert.deepEqual(db.state, before);
@@ -175,7 +165,6 @@ test('application failure rolls back the last vote, lead and audit entries toget
 
 test('notification failure rolls back the applied lead and both-vote completion', async () => {
   const db = database();
-  await reviewLeadChange(9, 'approve', '', salesHead, dependencies(db));
   const before = structuredClone(db.state);
   db.failNotifications = true;
   await assert.rejects(reviewLeadChange(9, 'approve', '', estimationHead, dependencies(db)), /Notification insert failed/);

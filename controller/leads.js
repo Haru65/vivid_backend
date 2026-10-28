@@ -29,6 +29,11 @@ const LEAD_COLUMNS = `
   lead_source,
   lead_status,
   NULLIF(to_jsonb(leads)->>'loss_reason', '') AS loss_reason,
+  NULLIF(to_jsonb(leads)->>'hold_reason', '') AS hold_reason,
+  NULLIF(to_jsonb(leads)->>'drop_reason', '') AS drop_reason,
+  NULLIF(to_jsonb(leads)->>'status_before_hold', '') AS status_before_hold,
+  to_jsonb(leads)->>'held_at' AS held_at,
+  to_jsonb(leads)->>'dropped_at' AS dropped_at,
   NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
   requirements_summary,
   assigned_to,
@@ -63,6 +68,11 @@ const LEAD_TABLE_COLUMNS = `
   l.lead_source,
   l.lead_status,
   NULLIF(to_jsonb(l)->>'loss_reason', '') AS loss_reason,
+  NULLIF(to_jsonb(l)->>'hold_reason', '') AS hold_reason,
+  NULLIF(to_jsonb(l)->>'drop_reason', '') AS drop_reason,
+  NULLIF(to_jsonb(l)->>'status_before_hold', '') AS status_before_hold,
+  to_jsonb(l)->>'held_at' AS held_at,
+  to_jsonb(l)->>'dropped_at' AS dropped_at,
   NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
   l.requirements_summary,
   l.assigned_to,
@@ -71,7 +81,7 @@ const LEAD_TABLE_COLUMNS = `
 `;
 
 const ACTIVITY_TYPES = new Set(['note', 'call', 'whatsapp', 'system', 'email', 'meeting', 'negotiation', 'approval_requested', 'approval']);
-const LEAD_STATUSES = new Set(['New', 'Qualified', 'Proposal Sent', 'Negotiation', 'Proposal Accepted', 'Lost']);
+const LEAD_STATUSES = new Set(['New', 'Qualified', 'Proposal Sent', 'Negotiation', 'Proposal Accepted', 'Lost', 'On Hold', 'Dropped']);
 const LEAD_PRIORITIES = new Set(['Low', 'Medium', 'High', 'Urgent']);
 const ENQUIRY_STATES = new Set(['Purchase', 'Tender', 'Budget']);
 const SALES_APPROVAL_STATUSES = new Set(['Vivid Approved', 'Vivid Not Approved', 'OEM']);
@@ -1012,7 +1022,7 @@ async function updateLead(id, leadData, user, options = {}) {
              sales_owner_name = $2,
              updated_at = CURRENT_TIMESTAMP
          WHERE lead_id = $3
-           AND status NOT IN ('cancelled', 'discarded')`,
+           AND status NOT IN ('cancelled', 'discarded', 'dropped')`,
         [owner.id, owner.name, id],
       );
     }
@@ -1022,7 +1032,7 @@ async function updateLead(id, leadData, user, options = {}) {
          SET project_name = $1,
              updated_at = CURRENT_TIMESTAMP
          WHERE lead_id = $2
-           AND status NOT IN ('cancelled', 'discarded')`,
+           AND status NOT IN ('cancelled', 'discarded', 'dropped')`,
         [lead.project_name, id],
       );
     }
@@ -1054,6 +1064,67 @@ async function updateLead(id, leadData, user, options = {}) {
   }
 
   return options.db ? lead : (await retrieveLead(lead.id)) || lead;
+}
+
+async function setLeadWorkflowState(id, data, user) {
+  const action = String(data?.action || '').trim().toLowerCase();
+  if (!['hold', 'resume', 'drop'].includes(action)) throw validationError('Workflow action must be hold, resume, or drop.');
+  const reason = action === 'resume' ? null : text(data?.reason, `${action === 'hold' ? 'Hold' : 'Drop'} reason`, 2000, true);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(`SELECT * FROM leads WHERE id = $1 FOR UPDATE`, [id]);
+    const lead = result.rows[0];
+    if (!lead) throw Object.assign(new Error('Lead not found.'), { statusCode: 404 });
+    if (!canAccessLead(lead, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
+
+    if (action === 'hold') {
+      if (lead.lead_status === 'On Hold') throw Object.assign(new Error('This lead is already on hold.'), { statusCode: 409 });
+      if (['Dropped', 'Lost'].includes(lead.lead_status)) throw Object.assign(new Error('A dropped or lost lead cannot be put on hold.'), { statusCode: 409 });
+      await client.query(
+        `UPDATE leads SET status_before_hold = lead_status, lead_status = 'On Hold', hold_reason = $2, held_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [id, reason],
+      );
+      await client.query(
+        `UPDATE estimation_requests SET status_before_hold = status, status = 'on_hold', hold_reason = $2, held_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = $1 AND status NOT IN ('on_hold', 'dropped', 'discarded', 'cancelled')`,
+        [id, reason],
+      );
+    } else if (action === 'resume') {
+      if (lead.lead_status !== 'On Hold') throw Object.assign(new Error('Only a lead on hold can be resumed.'), { statusCode: 409 });
+      await client.query(
+        `UPDATE leads SET lead_status = COALESCE(NULLIF(status_before_hold, ''), 'New'), status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [id],
+      );
+      await client.query(
+        `UPDATE estimation_requests SET status = COALESCE(NULLIF(status_before_hold, ''), 'submitted'), status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = $1 AND status = 'on_hold'`,
+        [id],
+      );
+    } else {
+      if (lead.lead_status === 'Dropped') throw Object.assign(new Error('This lead is already dropped.'), { statusCode: 409 });
+      await client.query(
+        `UPDATE leads SET lead_status = 'Dropped', drop_reason = $2, dropped_at = CURRENT_TIMESTAMP, status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [id, reason],
+      );
+      await client.query(
+        `UPDATE estimation_requests SET status = 'dropped', drop_reason = $2, dropped_at = CURRENT_TIMESTAMP, status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = $1 AND status NOT IN ('dropped', 'discarded', 'cancelled')`,
+        [id, reason],
+      );
+    }
+
+    const label = action === 'hold' ? `Lead put on hold. Reason: ${reason}`
+      : action === 'drop' ? `Lead dropped. Reason: ${reason}` : 'Lead resumed from hold.';
+    await insertLeadActivity(id, { activity_type: 'system', content: label, metadata: { event: `lead_${action}`, reason } }, user, client);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+  return retrieveLead(id);
 }
 
 async function deleteLead(id, user) {
@@ -1168,6 +1239,7 @@ module.exports = {
   logLeadActivity,
   createLead,
   updateLead,
+  setLeadWorkflowState,
   deleteLead,
   acceptProposal,
 };

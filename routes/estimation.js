@@ -6,6 +6,7 @@ const {
   assignRequest,
   createOrUpdateRequestQuotation,
   discardRequest,
+  setEstimationWorkflowState,
   generatePoSheetPdf,
   getUploadedRequestQuotationPdf,
   getPoSheet,
@@ -77,6 +78,11 @@ router.post('/:id/client-approved', async (req, res) => {
 router.post('/:id/discard', async (req, res) => {
   try { res.json(await discardRequest(req.params.id, req.body, currentUser(req))); }
   catch (error) { handleError(res, 'Unable to discard estimation request', error); }
+});
+
+router.post('/:id/workflow-action', async (req, res) => {
+  try { res.json(await setEstimationWorkflowState(req.params.id, req.body, currentUser(req))); }
+  catch (error) { handleError(res, 'Unable to update estimation workflow', error); }
 });
 
 router.post('/:id/po/sales', async (req, res) => {

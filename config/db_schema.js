@@ -38,6 +38,11 @@ async function createLeadSchema() {
       lead_source VARCHAR(255) NOT NULL,
       lead_status VARCHAR(50) NOT NULL,
       loss_reason VARCHAR(255),
+      hold_reason TEXT,
+      drop_reason TEXT,
+      status_before_hold VARCHAR(50),
+      held_at TIMESTAMPTZ,
+      dropped_at TIMESTAMPTZ,
       requirements_summary TEXT,
       assigned_to VARCHAR(255),
       sales_owner_id BIGINT,
@@ -73,6 +78,11 @@ async function createLeadSchema() {
     ADD COLUMN IF NOT EXISTS industry_type VARCHAR(100),
     ADD COLUMN IF NOT EXISTS enquiry_number VARCHAR(50),
     ADD COLUMN IF NOT EXISTS loss_reason VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS hold_reason TEXT,
+    ADD COLUMN IF NOT EXISTS drop_reason TEXT,
+    ADD COLUMN IF NOT EXISTS status_before_hold VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS held_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS dropped_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS sales_owner_id BIGINT,
     ADD COLUMN IF NOT EXISTS current_stage VARCHAR(50) NOT NULL DEFAULT 'enquiry',
     ADD COLUMN IF NOT EXISTS current_assignee_id BIGINT,
@@ -844,7 +854,7 @@ async function createEstimationRequestSchema() {
       current_stage VARCHAR(50) NOT NULL DEFAULT 'estimation_submitted',
       current_assignee_id BIGINT,
       status VARCHAR(50) NOT NULL DEFAULT 'submitted'
-        CHECK (status IN ('submitted', 'assigned', 'in_progress', 'submitted_for_review', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress', 'revision_submitted_for_review', 'approved', 'returned_to_sales', 'sent_to_client', 'client_approved', 'discarded', 'po_sales_draft', 'po_submitted_to_estimation', 'po_estimation_in_progress', 'po_submitted_to_head', 'po_approved_by_estimation_head', 'cancelled')),
+        CHECK (status IN ('submitted', 'assigned', 'in_progress', 'submitted_for_review', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress', 'revision_submitted_for_review', 'approved', 'returned_to_sales', 'sent_to_client', 'client_approved', 'discarded', 'on_hold', 'dropped', 'po_sales_draft', 'po_submitted_to_estimation', 'po_estimation_in_progress', 'po_submitted_to_head', 'po_approved_by_estimation_head', 'cancelled')),
       segment VARCHAR(100),
       project_name VARCHAR(255),
       site_location VARCHAR(255),
@@ -855,6 +865,11 @@ async function createEstimationRequestSchema() {
       assignment_notes TEXT,
       review_notes TEXT,
       revision_notes TEXT,
+      hold_reason TEXT,
+      drop_reason TEXT,
+      status_before_hold VARCHAR(50),
+      held_at TIMESTAMPTZ,
+      dropped_at TIMESTAMPTZ,
       submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       assigned_at TIMESTAMPTZ,
       engineer_started_at TIMESTAMPTZ,
@@ -879,6 +894,11 @@ async function createEstimationRequestSchema() {
     ADD COLUMN IF NOT EXISTS assignment_notes TEXT,
     ADD COLUMN IF NOT EXISTS review_notes TEXT,
     ADD COLUMN IF NOT EXISTS revision_notes TEXT,
+    ADD COLUMN IF NOT EXISTS hold_reason TEXT,
+    ADD COLUMN IF NOT EXISTS drop_reason TEXT,
+    ADD COLUMN IF NOT EXISTS status_before_hold VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS held_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS dropped_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS current_stage VARCHAR(50) NOT NULL DEFAULT 'estimation_submitted',
     ADD COLUMN IF NOT EXISTS current_assignee_id BIGINT;
   `);
@@ -893,7 +913,7 @@ async function createEstimationRequestSchema() {
   await pool.query(`
     ALTER TABLE estimation_requests
     ADD CONSTRAINT estimation_requests_status_check
-    CHECK (status IN ('submitted', 'assigned', 'in_progress', 'submitted_for_review', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress', 'revision_submitted_for_review', 'approved', 'returned_to_sales', 'sent_to_client', 'client_approved', 'discarded', 'po_sales_draft', 'po_submitted_to_estimation', 'po_estimation_in_progress', 'po_submitted_to_head', 'po_approved_by_estimation_head', 'cancelled'));
+    CHECK (status IN ('submitted', 'assigned', 'in_progress', 'submitted_for_review', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress', 'revision_submitted_for_review', 'approved', 'returned_to_sales', 'sent_to_client', 'client_approved', 'discarded', 'on_hold', 'dropped', 'po_sales_draft', 'po_submitted_to_estimation', 'po_estimation_in_progress', 'po_submitted_to_head', 'po_approved_by_estimation_head', 'cancelled'));
   `);
 
   await pool.query(`
@@ -908,7 +928,7 @@ async function createEstimationRequestSchema() {
     DROP INDEX IF EXISTS estimation_requests_open_lead_idx;
     CREATE UNIQUE INDEX estimation_requests_open_lead_idx
     ON estimation_requests (lead_id)
-    WHERE status NOT IN ('cancelled', 'discarded', 'sent_to_client');
+    WHERE status NOT IN ('cancelled', 'discarded', 'dropped', 'sent_to_client');
   `);
 
   await pool.query(`
@@ -1112,7 +1132,7 @@ async function createLeadChangeRequestSchema(db = pool) {
       company_name VARCHAR(255) NOT NULL,
       requested_by_user_id BIGINT NOT NULL,
       requested_by_name VARCHAR(255) NOT NULL,
-      sales_head_id BIGINT NOT NULL,
+      sales_head_id BIGINT,
       estimation_head_id BIGINT NOT NULL,
       before_snapshot JSONB NOT NULL,
       proposed_snapshot JSONB NOT NULL,
@@ -1134,6 +1154,7 @@ async function createLeadChangeRequestSchema(db = pool) {
     CREATE INDEX IF NOT EXISTS lead_change_requests_review_idx
       ON lead_change_requests (sales_head_id, estimation_head_id, status, created_at DESC);
   `);
+  await db.query(`ALTER TABLE lead_change_requests ALTER COLUMN sales_head_id DROP NOT NULL;`);
 }
 
 async function createSchemas() {

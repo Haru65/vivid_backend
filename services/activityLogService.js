@@ -23,7 +23,7 @@ function validDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
 }
 
-async function listActivityLogs(query = {}) {
+async function listActivityLogs(query = {}, user = {}, db = pool) {
   const page = positiveInteger(query.page, 1, 1000000);
   const limit = positiveInteger(query.limit, 50, 100);
   const offset = (page - 1) * limit;
@@ -33,6 +33,11 @@ async function listActivityLogs(query = {}) {
     values.push(value);
     return `$${values.length}`;
   };
+
+  // Estimation Heads only need the approval audit trail. Keep this restriction
+  // server-side so query parameters cannot expose unrelated workspace activity.
+  const approvalOnly = user.role === 'estimation_head';
+  if (approvalOnly) conditions.push(`a.activity_type IN ('approval_requested', 'approval')`);
 
   const search = String(query.q || '').trim().slice(0, 200);
   if (search) {
@@ -67,9 +72,9 @@ async function listActivityLogs(query = {}) {
     ${where}
   `;
 
-  const countResult = await pool.query(`SELECT COUNT(*)::INTEGER AS total ${baseFrom}`, values);
+  const countResult = await db.query(`SELECT COUNT(*)::INTEGER AS total ${baseFrom}`, values);
   const pageValues = [...values, limit, offset];
-  const rowsResult = await pool.query(
+  const rowsResult = await db.query(
     `SELECT
        a.id,
        a.lead_id,
@@ -92,11 +97,12 @@ async function listActivityLogs(query = {}) {
   );
 
   const [typesResult, actorsResult] = await Promise.all([
-    pool.query('SELECT DISTINCT activity_type FROM lead_activities ORDER BY activity_type ASC'),
-    pool.query(`
+    db.query(`SELECT DISTINCT activity_type FROM lead_activities${approvalOnly ? " WHERE activity_type IN ('approval_requested', 'approval')" : ''} ORDER BY activity_type ASC`),
+    db.query(`
       SELECT actor_name, MIN(actor_user_id) AS actor_user_id
       FROM lead_activities
       WHERE NULLIF(TRIM(actor_name), '') IS NOT NULL
+        ${approvalOnly ? "AND activity_type IN ('approval_requested', 'approval')" : ''}
       GROUP BY actor_name
       ORDER BY actor_name ASC
     `),

@@ -203,7 +203,7 @@ async function submitLeadToEstimation(leadId, user) {
   try {
     await client.query('BEGIN');
     const leadResult = await client.query(
-      `SELECT id, customer_id, company_name, project_name, assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, segment, site_location,
+      `SELECT id, customer_id, company_name, project_name, lead_status, assigned_to, NULLIF(to_jsonb(leads)->>'sales_owner_id', '')::BIGINT AS sales_owner_id, segment, site_location,
               consultant, enquiry_product, enquiry_notes, requirements_summary
        FROM leads
        WHERE id = $1
@@ -212,6 +212,9 @@ async function submitLeadToEstimation(leadId, user) {
     );
     const lead = leadResult.rows[0];
     if (!lead) throw appError('Lead not found.', 404);
+    if (['On Hold', 'Dropped', 'Lost'].includes(lead.lead_status)) {
+      throw appError(`A ${String(lead.lead_status).toLowerCase()} lead cannot be submitted to estimation.`, 409);
+    }
     if (INDIVIDUAL_SALES_ROLES.has(user?.role)
       && String(lead.sales_owner_id || '') !== String(user?.id || '')
       && lead.assigned_to !== actorName(user)) {
@@ -220,7 +223,7 @@ async function submitLeadToEstimation(leadId, user) {
     }
     const existing = await client.query(
       `SELECT id FROM estimation_requests
-       WHERE lead_id = $1 AND status NOT IN ('cancelled', 'discarded')
+       WHERE lead_id = $1 AND status NOT IN ('cancelled', 'discarded', 'dropped')
        LIMIT 1`,
       [lead.id],
     );
@@ -932,6 +935,69 @@ async function discardRequest(id, data, user) {
   return getRequest(id, user);
 }
 
+async function setEstimationWorkflowState(id, data, user) {
+  if (!SALES_ROLES.has(user?.role) && !ESTIMATION_ROLES.has(user?.role)) {
+    throw appError('Only sales or estimation users can update this workflow.', 403);
+  }
+  const action = String(data?.action || '').trim().toLowerCase();
+  if (!['hold', 'resume', 'drop'].includes(action)) throw appError('Workflow action must be hold, resume, or drop.');
+  const reason = action === 'resume' ? null : text(data?.reason, `${action === 'hold' ? 'Hold' : 'Drop'} reason`, 2000, true);
+  const client = await pool.connect();
+  let request;
+  try {
+    await client.query('BEGIN');
+    request = await getRequest(id, user, client);
+    const locked = await client.query(`SELECT * FROM estimation_requests WHERE id = $1 FOR UPDATE`, [id]);
+    request = { ...request, ...locked.rows[0] };
+
+    if (action === 'hold') {
+      if (request.status === 'on_hold') throw appError('This estimation is already on hold.', 409);
+      if (['dropped', 'discarded', 'cancelled'].includes(request.status)) throw appError('A closed estimation cannot be put on hold.', 409);
+      await client.query(
+        `UPDATE estimation_requests SET status_before_hold = status, status = 'on_hold', hold_reason = $2, held_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [id, reason],
+      );
+      await client.query(
+        `UPDATE leads SET status_before_hold = CASE WHEN lead_status = 'On Hold' THEN status_before_hold ELSE lead_status END,
+          lead_status = 'On Hold', hold_reason = $2, held_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [request.lead_id, reason],
+      );
+    } else if (action === 'resume') {
+      if (request.status !== 'on_hold') throw appError('Only an estimation on hold can be resumed.', 409);
+      await client.query(
+        `UPDATE estimation_requests SET status = COALESCE(NULLIF(status_before_hold, ''), 'submitted'), status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [id],
+      );
+      await client.query(
+        `UPDATE leads SET lead_status = COALESCE(NULLIF(status_before_hold, ''), 'Qualified'), status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND lead_status = 'On Hold'`,
+        [request.lead_id],
+      );
+    } else {
+      if (request.status === 'dropped') throw appError('This estimation is already dropped.', 409);
+      await client.query(
+        `UPDATE estimation_requests SET status = 'dropped', drop_reason = $2, dropped_at = CURRENT_TIMESTAMP, status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [id, reason],
+      );
+      await client.query(
+        `UPDATE leads SET lead_status = 'Dropped', drop_reason = $2, dropped_at = CURRENT_TIMESTAMP, status_before_hold = NULL, hold_reason = NULL, held_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [request.lead_id, reason],
+      );
+    }
+
+    const label = action === 'hold' ? `Estimation put on hold. Reason: ${reason}`
+      : action === 'drop' ? `Estimation dropped. Reason: ${reason}` : 'Estimation resumed from hold.';
+    await logLeadActivity(request.lead_id, { activity_type: 'system', content: label, metadata: { event: `estimation_${action}`, estimation_request_id: Number(id), reason } }, user, client);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+  return getRequest(id, user);
+}
+
 async function upsertPoSheet(id, user, salesData = {}) {
   requireSales(user);
   const request = await getRequest(id, user);
@@ -1345,6 +1411,7 @@ module.exports = {
   savePoEstimation,
   upsertPoSheet,
   discardRequest,
+  setEstimationWorkflowState,
   markClientApproved,
   requestSalesRevision,
   approveRequest,

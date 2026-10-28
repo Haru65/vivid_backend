@@ -326,7 +326,7 @@ async function leadForPreparation(db, leadId, user) {
      LEFT JOIN LATERAL (
        SELECT assigned_engineer_id
        FROM estimation_requests
-       WHERE lead_id = l.id AND status NOT IN ('cancelled', 'discarded')
+       WHERE lead_id = l.id AND status NOT IN ('cancelled', 'discarded', 'dropped')
        ORDER BY updated_at DESC, id DESC
        LIMIT 1
      ) er ON TRUE

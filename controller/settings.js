@@ -6,10 +6,24 @@ const DEFAULT_TAX_SETTINGS = {
   sgst_rate: 9,
 };
 
+const DEAL_PRODUCTS = [
+  'HT',
+  'LT – 61439',
+  '60439',
+  'Artuk',
+  'Siemens Siepan – 8PU',
+  'Enersys – L&T',
+  'TI',
+  'Trading',
+  'Busduct',
+  'SKID',
+  'PDU',
+];
+
 const DEFAULT_MASTER_SETTINGS = {
   industry_types: ['Manufacturing', 'Pharma', 'Food', 'Chemical', 'Textile', 'Automotive', 'Infrastructure', 'OEM', 'EPC'],
   lead_sources: ['Website', 'Referral', 'IndiaMART', 'TradeIndia', 'Exhibition', 'Cold Call', 'Existing Customer', 'WhatsApp', 'Email'],
-  product_categories: ['PCC Panel', 'MCC Panel', 'APFC Panel', 'VFD Panel', 'AMF Panel', 'HT Panel', 'LT Panel', 'Bus Duct', 'Control Panel'],
+  product_categories: ['PCC Panel', 'MCC Panel', 'APFC Panel', 'VFD Panel', 'AMF Panel', 'HT Panel', 'LT Panel', 'Bus Duct', 'Control Panel', ...DEAL_PRODUCTS],
   quotation_terms: ['50% advance with PO, balance before dispatch', 'Delivery within 4-6 weeks after technical clearance', 'Warranty 12 months from commissioning or 18 months from dispatch', 'Offer valid for 30 days'],
   departments: ['Sales', 'Design', 'Estimation', 'Purchase', 'Production', 'QA/QC', 'Dispatch', 'Management', 'Accounts'],
   designations: ['Sales Executive', 'Sales Head', 'ERP Manager', 'Design Engineer', 'Purchase Head', 'Production Manager', 'QA Engineer', 'Workspace Admin'],
@@ -134,6 +148,7 @@ function normalizeMasterSettings(data = {}) {
     if (key === 'quotation_numbering') return [key, normalizeQuotationNumbering(data[key])];
     if (key === 'quotation_price_points') return [key, normalizePricePoints(data[key], fallback)];
     if (key === 'technical_note_fields') return [key, normalizeTechnicalNoteFields(data[key], fallback)];
+    if (key === 'product_categories') return [key, normalizeMasterList([...normalizeMasterList(data[key], fallback), ...DEAL_PRODUCTS], fallback)];
     return [key, normalizeMasterList(data[key], fallback)];
   }));
 }

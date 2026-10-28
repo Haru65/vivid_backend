@@ -3,7 +3,7 @@ const test = require('node:test');
 
 // Opt in with RUN_LEAD_CHANGE_DB_TEST=1. All writes use connection-local TEMP
 // tables; application tables and their sequences are never written to.
-test('PostgreSQL: submission, dual approval, logs, notification targeting and stale conflict', {
+test('PostgreSQL: submission, Estimation Head approval, logs, notification targeting and stale conflict', {
   skip: process.env.RUN_LEAD_CHANGE_DB_TEST !== '1',
 }, async () => {
   const pool = require('../config/db_connection');
@@ -57,14 +57,12 @@ test('PostgreSQL: submission, dual approval, logs, notification targeting and st
     const estimationHead = { id: 3, name: 'Estimation Head', role: 'estimation_head' };
     const original = (await client.query('SELECT *, enquiry_date::text AS enquiry_date FROM leads WHERE id = 7')).rows[0];
     await client.query('BEGIN');
-    const proposed = await updateLead(7, { ...original, project_name: 'Revised project', change_reviewers: { sales_head_id: 2, estimation_head_id: 3 } }, salesEngineer, { db });
+    const proposed = await updateLead(7, { ...original, project_name: 'Revised project', change_reviewers: { estimation_head_id: 3 } }, salesEngineer, { db });
     await client.query('COMMIT');
     assert.equal(proposed.approval_required, true);
     assert.equal((await client.query('SELECT project_name FROM leads WHERE id = 7')).rows[0].project_name, 'Original project');
     const requestId = proposed.change_request.id;
-    await assert.rejects(reviewLeadChange(requestId, 'approve', '', { ...salesHead, id: 6 }, deps), { statusCode: 403 });
-    assert.equal((await reviewLeadChange(requestId, 'approve', 'Sales reviewed', salesHead, deps)).status, 'pending');
-    assert.equal((await client.query('SELECT project_name FROM leads WHERE id = 7')).rows[0].project_name, 'Original project');
+    await assert.rejects(reviewLeadChange(requestId, 'approve', '', salesHead, deps), { statusCode: 403 });
     const applied = await reviewLeadChange(requestId, 'approve', 'Estimation reviewed', estimationHead, deps);
     assert.equal(applied.status, 'applied');
     assert.equal((await client.query('SELECT project_name FROM leads WHERE id = 7')).rows[0].project_name, 'Revised project');
@@ -85,10 +83,9 @@ test('PostgreSQL: submission, dual approval, logs, notification targeting and st
 
     const current = (await client.query('SELECT *, enquiry_date::text AS enquiry_date FROM leads WHERE id = 7')).rows[0];
     await client.query('BEGIN');
-    const stale = await updateLead(7, { ...current, project_name: 'Next proposal', change_reviewers: { sales_head_id: 2, estimation_head_id: 3 } }, salesEngineer, { db });
+    const stale = await updateLead(7, { ...current, project_name: 'Next proposal', change_reviewers: { estimation_head_id: 3 } }, salesEngineer, { db });
     await client.query('COMMIT');
     await client.query(`UPDATE leads SET priority = 'High' WHERE id = 7`);
-    await reviewLeadChange(stale.change_request.id, 'approve', '', salesHead, deps);
     assert.equal((await reviewLeadChange(stale.change_request.id, 'approve', '', estimationHead, deps)).status, 'conflict');
     assert.equal((await client.query('SELECT project_name FROM leads WHERE id = 7')).rows[0].project_name, 'Revised project');
   } finally {
