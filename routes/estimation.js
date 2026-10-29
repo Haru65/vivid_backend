@@ -2,6 +2,7 @@
 const express = require('express');
 const {
   approvePoSheet,
+  declinePoSheet,
   approveRequest,
   assignRequest,
   createOrUpdateRequestQuotation,
@@ -98,6 +99,11 @@ router.post('/:id/po/estimation', async (req, res) => {
 router.post('/:id/po/approve', async (req, res) => {
   try { res.json(await approvePoSheet(req.params.id, currentUser(req))); }
   catch (error) { handleError(res, 'Unable to approve PO sheet', error); }
+});
+
+router.post('/:id/po/decline', async (req, res) => {
+  try { res.json(await declinePoSheet(req.params.id, req.body, currentUser(req))); }
+  catch (error) { handleError(res, 'Unable to decline Frontsheet approval', error); }
 });
 
 router.get('/:id/po', async (req, res) => {

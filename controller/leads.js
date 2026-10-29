@@ -195,10 +195,10 @@ async function resolveSalesOwner(data, user, db = pool) {
      FROM users
      WHERE id = $1
        AND is_active = TRUE
-       AND role IN ('salesperson', 'sales_engineer', 'presales')`,
+       AND role IN ('salesperson', 'sales_engineer', 'presales', 'sales_head')`,
     [ownerId],
   );
-  if (!result.rows[0]) throw validationError('Select an active salesperson, sales engineer, or presales user.');
+  if (!result.rows[0]) throw validationError('Select an active salesperson, sales engineer, presales user, or Sales Head.');
   return {
     id: Number(result.rows[0].id),
     name: [result.rows[0].first_name, result.rows[0].last_name].filter(Boolean).join(' '),
@@ -313,7 +313,7 @@ async function resolveFollowupAssignee(data = {}, fallback = {}) {
 }
 
 function canReceiveLeadFollowup(lead, assignee) {
-  return ['admin', 'sales_head', 'presales'].includes(roleOf(assignee))
+  return roleOf(assignee) === 'presales'
     || String(lead?.sales_owner_id || '') === String(assignee?.id || '')
     || String(lead?.assigned_to || '').trim() === actorName(assignee);
 }
@@ -609,16 +609,20 @@ async function retrieveLeadFollowups(leadId, user) {
     `SELECT ${followupColumns()}
      FROM lead_followups f
      WHERE f.lead_id = $1
+       AND f.assigned_to_user_id = $2
      ORDER BY CASE f.status WHEN 'Open' THEN 0 WHEN 'Completed' THEN 1 ELSE 2 END,
               f.due_at ASC,
               f.id ASC`,
-    [leadId],
+    [leadId, user?.id],
   );
   return result.rows;
 }
 
 async function createLeadFollowup(leadId, followupData, user) {
   const lead = await leadForAccess(leadId, user);
+  if (!['admin', 'sales_head'].includes(roleOf(user))) {
+    throw Object.assign(new Error('Only Admin or Sales Head can assign follow-ups.'), { statusCode: 403 });
+  }
   const values = normalizeFollowup(followupData);
   if (values.followupType === 'Meeting' && values.status === 'Completed') {
     throw validationError('Schedule the onsite meeting first, then complete it with a captured location.');
@@ -657,6 +661,9 @@ async function createLeadFollowup(leadId, followupData, user) {
 
 async function updateLeadFollowup(leadId, followupId, followupData, user) {
   const lead = await leadForAccess(leadId, user);
+  if (!['admin', 'sales_head'].includes(roleOf(user))) {
+    throw Object.assign(new Error('Only Admin or Sales Head can update follow-up assignments.'), { statusCode: 403 });
+  }
   const existing = await pool.query(
     `SELECT ${followupColumns()}
      FROM lead_followups f
@@ -724,13 +731,11 @@ async function completeLeadFollowup(leadId, followupId, completionData, user) {
   const current = existing.rows[0] || null;
   if (!current) return null;
   if (current.status === 'Completed') return current;
+  if (String(current.assigned_to_user_id || '') !== String(user?.id || '')) {
+    throw Object.assign(new Error('Only the assigned user can complete this follow-up.'), { statusCode: 403 });
+  }
 
   const onsite = current.followup_type === 'Meeting';
-  if (onsite && String(current.assigned_to_user_id || '') !== String(user?.id || '')) {
-    const error = new Error('Only the assigned sales engineer can complete this onsite meeting.');
-    error.statusCode = 403;
-    throw error;
-  }
   const location = onsite ? normalizeCompletionLocation(completionData?.location) : null;
   const result = await pool.query(
     `UPDATE lead_followups
@@ -765,6 +770,9 @@ async function completeLeadFollowup(leadId, followupId, completionData, user) {
 
 async function cancelLeadFollowup(leadId, followupId, user) {
   const lead = await leadForAccess(leadId, user);
+  if (!['admin', 'sales_head'].includes(roleOf(user))) {
+    throw Object.assign(new Error('Only Admin or Sales Head can cancel a follow-up assignment.'), { statusCode: 403 });
+  }
   const result = await pool.query(
     `UPDATE lead_followups
      SET status = 'Cancelled',

@@ -6,6 +6,8 @@ const { createNotification, notifyRole, notifyUserId } = require('./notification
 const { getMasterSettings } = require('../controller/settings');
 const { sendEmail } = require('./emailService');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const fs = require('fs');
+const path = require('path');
 
 const HEAD_ROLES = new Set(['admin', 'sales_head', 'estimation_head']);
 const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales']);
@@ -42,6 +44,10 @@ function requireEstimation(user) {
 
 function requireEstimationHead(user) {
   if (!isEstimationHead(user)) throw appError('Only estimation head can assign or approve estimation work.', 403);
+}
+
+function requireAdmin(user) {
+  if (user?.role !== 'admin') throw appError('Only Admin can approve or decline a Frontsheet approval request.', 403);
 }
 
 function text(value, field, maxLength, required = false) {
@@ -104,9 +110,21 @@ const SELECT_REQUEST = `
   pcs.sales_data AS po_sales_data,
   pcs.estimation_data AS po_estimation_data,
   pcs.status AS po_sheet_status,
+  pcs.sales_submitted_by_name AS po_sales_submitted_by_name,
   pcs.sales_submitted_at AS po_sales_submitted_at,
+  pcs.estimation_filled_by_name AS po_estimation_filled_by_name,
   pcs.estimation_filled_at AS po_estimation_filled_at,
-  pcs.head_approved_at AS po_head_approved_at
+  pcs.head_approved_by_name AS po_head_approved_by_name,
+  pcs.head_approved_at AS po_head_approved_at,
+  pcs.approval_required AS po_approval_required,
+  pcs.approval_requested_by_name AS po_approval_requested_by_name,
+  pcs.approval_requested_at AS po_approval_requested_at,
+  pcs.md_approval_status AS po_md_approval_status,
+  pcs.md_decided_by_name AS po_md_decided_by_name,
+  pcs.md_decided_at AS po_md_decided_at,
+  pcs.md_decision_comments AS po_md_decision_comments,
+  pcs.order_finalized_by_name AS po_order_finalized_by_name,
+  pcs.order_finalized_at AS po_order_finalized_at
 `;
 
 function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
@@ -1090,60 +1108,171 @@ async function upsertPoSheet(id, user, salesData = {}) {
   } finally {
     client.release();
   }
-  if (request.assigned_engineer_id) await notifyUserId(request.assigned_engineer_id, { title: 'PO sheet submitted', body: `${actorName(user)} submitted PO closure sheet.`, category: 'po', link_type: 'estimation_request', link_id: id });
+  const frontSheetNotification = { title: 'Frontsheet submitted', body: `${actorName(user)} submitted a Frontsheet for finalization.`, category: 'po', link_type: 'estimation_request', link_id: id };
+  if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, frontSheetNotification);
+  else await notifyRole('estimation_head', frontSheetNotification);
   await logLeadActivity(request.lead_id, { activity_type: 'system', content: 'PO closure sheet submitted to estimation' }, user);
   return sheet;
 }
 
 async function savePoEstimation(id, data, user) {
-  requireEstimation(user);
+  requireEstimationHead(user);
   const request = await getRequest(id, user);
   if (!request.po_closure_sheet_id) throw appError('Sales must submit PO sheet first.');
-  if (request.status !== 'po_submitted_to_estimation') throw appError('PO estimation section can be filled only after sales submits the PO sheet.');
-  if (user.role === 'estimation_engineer' && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
-    throw appError('Only the assigned estimation engineer can fill this PO sheet.', 403);
+  if (request.status !== 'po_submitted_to_estimation') throw appError('Frontsheet can be finalized only after Sales submits it to Estimation.');
+
+  const payload = jsonObject(data, 'Frontsheet data');
+  const values = { ...jsonObject(payload.estimation_data || payload, 'PO estimation data') };
+  const revisedSalesData = payload.sales_data ? jsonObject(payload.sales_data, 'PO sales data') : null;
+  const workflowAction = payload.workflow_action === 'request_approval' ? 'request_approval' : 'finalize';
+  values.finalized_by = values.finalized_by || request.po_sales_submitted_by_name || request.sales_owner_name || actorName(user);
+  values.hod_approval = actorName(user);
+  delete values.workflow_action;
+
+  if (workflowAction === 'finalize' && request.po_approval_required && request.po_md_approval_status !== 'approved') {
+    throw appError('Admin approval is required before this Frontsheet can be finalized.', 409);
   }
-  const values = jsonObject(data, 'PO estimation data');
-  const result = await pool.query(
-    `UPDATE po_closure_sheets
-     SET estimation_data = $1,
-         status = 'submitted_to_head',
-         estimation_filled_by_user_id = $2,
-         estimation_filled_by_name = $3,
-         estimation_filled_at = CURRENT_TIMESTAMP,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $4 RETURNING *`,
-    [JSON.stringify(values), user?.id || null, actorName(user), request.po_closure_sheet_id],
-  );
-  await pool.query(`UPDATE estimation_requests SET status = 'po_submitted_to_head', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
-  if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, { title: 'PO sheet ready for approval', body: `${actorName(user)} filled estimation section.`, category: 'po', link_type: 'estimation_request', link_id: id });
-  await logLeadActivity(request.lead_id, { activity_type: 'system', content: 'Estimation section filled on PO closure sheet' }, user);
-  return result.rows[0];
+
+  const client = await pool.connect();
+  let sheet;
+  try {
+    await client.query('BEGIN');
+    const result = workflowAction === 'request_approval'
+      ? await client.query(
+        `UPDATE po_closure_sheets
+         SET sales_data = COALESCE($1::jsonb, sales_data),
+             estimation_data = $2,
+             status = 'submitted_to_head',
+             estimation_filled_by_user_id = $3,
+             estimation_filled_by_name = $4,
+             estimation_filled_at = CURRENT_TIMESTAMP,
+             head_approved_by_user_id = $3,
+             head_approved_by_name = $4,
+             head_approved_at = CURRENT_TIMESTAMP,
+             approval_required = TRUE,
+             approval_requested_by_user_id = $3,
+             approval_requested_by_name = $4,
+             approval_requested_at = CURRENT_TIMESTAMP,
+             md_approval_status = 'pending',
+             md_decided_by_user_id = NULL,
+             md_decided_by_name = NULL,
+             md_decided_at = NULL,
+             md_decision_comments = NULL,
+             order_finalized_by_user_id = NULL,
+             order_finalized_by_name = NULL,
+             order_finalized_at = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5 RETURNING *`,
+        [revisedSalesData ? JSON.stringify(revisedSalesData) : null, JSON.stringify(values), user?.id || null, actorName(user), request.po_closure_sheet_id],
+      )
+      : await client.query(
+        `UPDATE po_closure_sheets
+         SET sales_data = COALESCE($1::jsonb, sales_data),
+             estimation_data = $2,
+             status = 'approved_by_estimation_head',
+             estimation_filled_by_user_id = $3,
+             estimation_filled_by_name = $4,
+             estimation_filled_at = COALESCE(estimation_filled_at, CURRENT_TIMESTAMP),
+             head_approved_by_user_id = COALESCE(head_approved_by_user_id, $3),
+             head_approved_by_name = COALESCE(head_approved_by_name, $4),
+             head_approved_at = COALESCE(head_approved_at, CURRENT_TIMESTAMP),
+             md_approval_status = CASE WHEN approval_required THEN md_approval_status ELSE 'not_required' END,
+             md_decided_by_name = CASE WHEN approval_required THEN md_decided_by_name ELSE COALESCE(NULLIF($6, ''), 'Not required') END,
+             md_decided_at = CASE WHEN approval_required THEN md_decided_at ELSE CURRENT_TIMESTAMP END,
+             order_finalized_by_user_id = $3,
+             order_finalized_by_name = $7,
+             order_finalized_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5 RETURNING *`,
+        [revisedSalesData ? JSON.stringify(revisedSalesData) : null, JSON.stringify(values), user?.id || null, actorName(user), request.po_closure_sheet_id, values.md_approval || '', values.finalized_by],
+      );
+    sheet = result.rows[0];
+    if (revisedSalesData && request.quotation_id) {
+      await client.query(
+        `UPDATE quotations
+         SET customer_po_number = COALESCE($1, customer_po_number),
+             customer_po_date = COALESCE($2::date, customer_po_date),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $3`,
+        [revisedSalesData.po_number || null, revisedSalesData.po_date || null, request.quotation_id],
+      );
+    }
+    await client.query(`UPDATE estimation_requests SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id, workflowAction === 'request_approval' ? 'po_submitted_to_head' : 'po_approved_by_estimation_head']);
+    await logLeadActivity(request.lead_id, {
+      activity_type: 'system',
+      content: workflowAction === 'request_approval'
+        ? `Frontsheet sent for Admin approval by Estimation Head ${actorName(user)}`
+        : `Frontsheet finalized by Estimation Head ${actorName(user)}`,
+    }, user, client);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+  if (workflowAction === 'request_approval') {
+    await notifyRole('admin', { title: 'Frontsheet approval requested', body: `${actorName(user)} sent a Frontsheet for your approval.`, category: 'po', link_type: 'estimation_request', link_id: id });
+  } else if (request.sales_owner_id) {
+    await notifyUserId(request.sales_owner_id, { title: 'Frontsheet finalized', body: `${actorName(user)} finalized the Frontsheet.`, category: 'po', link_type: 'estimation_request', link_id: id });
+  }
+  return sheet;
 }
 
 async function approvePoSheet(id, user) {
-  requireEstimationHead(user);
+  requireAdmin(user);
   const request = await getRequest(id, user);
   if (!request.po_closure_sheet_id) throw appError('PO sheet not found.');
-  if (request.status !== 'po_submitted_to_head') throw appError('PO can be approved only after estimation submits its section.');
-  const sheetCheck = await pool.query(`SELECT status, estimation_data FROM po_closure_sheets WHERE id = $1`, [request.po_closure_sheet_id]);
+  if (request.status !== 'po_submitted_to_head') throw appError('This Frontsheet is not awaiting Admin approval.');
+  const sheetCheck = await pool.query(`SELECT status, estimation_data, md_approval_status FROM po_closure_sheets WHERE id = $1`, [request.po_closure_sheet_id]);
   const sheet = sheetCheck.rows[0];
-  if (!sheet || sheet.status !== 'submitted_to_head' || !sheet.estimation_data || !Object.keys(sheet.estimation_data).length) {
-    throw appError('Estimation section must be filled before HOD approval.');
+  if (!sheet || sheet.status !== 'submitted_to_head' || sheet.md_approval_status !== 'pending' || !sheet.estimation_data || !Object.keys(sheet.estimation_data).length) {
+    throw appError('This Frontsheet does not have a pending approval request.');
   }
   const result = await pool.query(
     `UPDATE po_closure_sheets
-     SET status = 'approved_by_estimation_head',
-         head_approved_by_user_id = $1,
-         head_approved_by_name = $2,
-         head_approved_at = CURRENT_TIMESTAMP,
+     SET status = 'submitted_to_estimation',
+         md_approval_status = 'approved',
+         md_decided_by_user_id = $1,
+         md_decided_by_name = $2,
+         md_decided_at = CURRENT_TIMESTAMP,
+         md_decision_comments = NULL,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $3 RETURNING *`,
     [user?.id || null, actorName(user), request.po_closure_sheet_id],
   );
-  await pool.query(`UPDATE estimation_requests SET status = 'po_approved_by_estimation_head', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
-  if (request.sales_owner_id) await notifyUserId(request.sales_owner_id, { title: 'PO sheet approved', body: 'Estimation Head approved the PO closure sheet.', category: 'po', link_type: 'estimation_request', link_id: id });
-  await logLeadActivity(request.lead_id, { activity_type: 'system', content: 'PO closure sheet approved by Estimation Head' }, user);
+  await pool.query(`UPDATE estimation_requests SET status = 'po_submitted_to_estimation', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
+  if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, { title: 'Frontsheet approved', body: `${actorName(user)} approved the Frontsheet. It is ready for finalization.`, category: 'po', link_type: 'estimation_request', link_id: id });
+  else await notifyRole('estimation_head', { title: 'Frontsheet approved', body: `${actorName(user)} approved the Frontsheet. It is ready for finalization.`, category: 'po', link_type: 'estimation_request', link_id: id });
+  await logLeadActivity(request.lead_id, { activity_type: 'system', content: `Frontsheet approved by Admin ${actorName(user)} and returned to Estimation` }, user);
+  return result.rows[0];
+}
+
+async function declinePoSheet(id, data, user) {
+  requireAdmin(user);
+  const request = await getRequest(id, user);
+  if (!request.po_closure_sheet_id) throw appError('Frontsheet not found.');
+  if (request.status !== 'po_submitted_to_head') throw appError('This Frontsheet is not awaiting Admin approval.');
+  const comments = text(data?.comments || data?.reason, 'Decline reason', 2000, true);
+  const result = await pool.query(
+    `UPDATE po_closure_sheets
+     SET status = 'changes_requested',
+         md_approval_status = 'declined',
+         md_decided_by_user_id = $1,
+         md_decided_by_name = $2,
+         md_decided_at = CURRENT_TIMESTAMP,
+         md_decision_comments = $3,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $4 AND md_approval_status = 'pending'
+     RETURNING *`,
+    [user?.id || null, actorName(user), comments, request.po_closure_sheet_id],
+  );
+  if (!result.rows[0]) throw appError('This Frontsheet approval request is no longer pending.', 409);
+  await pool.query(`UPDATE estimation_requests SET status = 'po_submitted_to_estimation', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [id]);
+  const notification = { title: 'Frontsheet approval declined', body: `${actorName(user)} declined the Frontsheet: ${comments}`, category: 'po', link_type: 'estimation_request', link_id: id };
+  if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, notification);
+  else await notifyRole('estimation_head', notification);
+  await logLeadActivity(request.lead_id, { activity_type: 'system', content: `Frontsheet declined by Admin ${actorName(user)}: ${comments}` }, user);
   return result.rows[0];
 }
 
@@ -1167,7 +1296,26 @@ function pdfText(value, fallback = '') {
 function poDate(value) {
   const date = value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) return pdfText(value, '-');
-  return date.toLocaleDateString('en-GB').replace(/\//g, '-');
+  return new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata',
+  }).format(date);
+}
+
+function poDateTime(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return pdfText(value, '-');
+  return new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Kolkata',
+  }).format(date).replace(',', '');
 }
 
 function poAmount(value, fallback = '-') {
@@ -1202,13 +1350,14 @@ async function buildPoFrontSheetPdf(request, sheet) {
   const page = pdfDoc.addPage([612, 792]);
   const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const frontSheetHeader = await pdfDoc.embedPng(
+    fs.readFileSync(path.join(__dirname, '../../VIVID_FRONTEND/public/Pasted image.png')),
+  );
   const black = rgb(0, 0, 0);
   const white = rgb(1, 1, 1);
   const salesFill = rgb(0.94, 0.93, 0.88);
   const salesBand = rgb(0.76, 0.85, 0.95);
   const estimationFill = rgb(0.86, 0.94, 0.96);
-  const brandRed = rgb(0.86, 0.10, 0.13);
-  const brandGreen = rgb(0.02, 0.48, 0.23);
   const left = 40;
   const tableWidth = 532;
   let cursor = 770;
@@ -1287,11 +1436,9 @@ async function buildPoFrontSheetPdf(request, sheet) {
     cursor -= height;
   };
 
-  // Branded heading from the approved front-sheet format.
+  // Branded heading supplied for the approved front-sheet format.
   page.drawRectangle({ x: left, y: cursor - 62, width: tableWidth, height: 62, color: white, borderColor: black, borderWidth: 0.35 });
-  page.drawText('VIVID', { x: 57, y: cursor - 29, size: 19, font: bold, color: brandRed });
-  page.drawText('ELECTRIFYING THE FUTURE', { x: 57, y: cursor - 44, size: 5.5, font: bold, color: brandGreen });
-  page.drawText('Vivid Electromech Pvt. Ltd.', { x: 180, y: cursor - 32, size: 21, font: bold, color: brandRed });
+  page.drawImage(frontSheetHeader, { x: left, y: cursor - 62, width: tableWidth, height: 62 });
   cursor -= 62;
 
   const documentDate = poDate(sales.po_date || sheet.updated_at);
@@ -1421,9 +1568,9 @@ async function buildPoFrontSheetPdf(request, sheet) {
     [{}, {}, { font: bold, size: 6, align: 'center' }, { font: bold, size: 6, align: 'center' }],
   );
   const approvalRows = [
-    ['Order Finalized by', est.finalized_by || sheet.sales_submitted_by_name || '-', ''],
-    ['HOD Approval', est.hod_approval || sheet.head_approved_by_name || '-', sheet.head_approved_at ? `Approved ${poDate(sheet.head_approved_at)}` : ''],
-    ['MD Approval', est.md_approval || '-', ''],
+    ['Order Finalized by', est.finalized_by || sheet.sales_submitted_by_name || '-', sheet.head_approved_at ? poDateTime(sheet.head_approved_at) : ''],
+    ['Estimation Head Approval', est.hod_approval || sheet.head_approved_by_name || '-', sheet.head_approved_at ? poDateTime(sheet.head_approved_at) : ''],
+    ['MD Approval', sheet.approval_required ? (sheet.md_approval_status === 'approved' ? sheet.md_decided_by_name || '-' : '-') : est.md_approval || sheet.md_decided_by_name || '-', sheet.approval_required ? (sheet.md_approval_status === 'approved' && sheet.md_decided_at ? poDateTime(sheet.md_decided_at) : '') : (sheet.head_approved_at ? poDateTime(sheet.head_approved_at) : '')],
   ];
   approvalRows.forEach(([label, name, signature]) => row(
     ['', label, name, signature],
@@ -1451,6 +1598,7 @@ module.exports = {
   generatePoSheetPdf,
   getPoSheet,
   approvePoSheet,
+  declinePoSheet,
   savePoEstimation,
   upsertPoSheet,
   discardRequest,
