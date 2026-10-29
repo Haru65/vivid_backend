@@ -53,6 +53,7 @@ const LEAD_TABLE_COLUMNS = `
   l.sales_approval_status,
   l.priority,
   l.customer_id,
+  (SELECT c.region FROM customers c WHERE c.id = l.customer_id) AS region,
   l.segment,
   l.site_location,
   l.billing_state,

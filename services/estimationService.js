@@ -90,6 +90,7 @@ const SELECT_REQUEST = `
   l.billing_pincode,
   l.precise_location,
   l.lead_status,
+  (SELECT c.region FROM customers c WHERE c.id = l.customer_id) AS region,
   l.enquiry_state,
   l.sales_approval_status,
   REGEXP_REPLACE(COALESCE(q.quotation_number, equ.quotation_number), '-R[0-9]+$', '', 'i') AS quotation_number,
@@ -1342,7 +1343,7 @@ function safePdfFilename(value) {
   return pdfText(value, 'PO').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'PO';
 }
 
-async function buildPoFrontSheetPdf(request, sheet) {
+async function buildPoFrontSheetPdf(request, sheet, options = {}) {
   const sales = sheet.sales_data || {};
   const est = sheet.estimation_data || {};
   const pdfDoc = await PDFDocument.create();
@@ -1350,9 +1351,17 @@ async function buildPoFrontSheetPdf(request, sheet) {
   const page = pdfDoc.addPage([612, 792]);
   const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const frontSheetHeader = await pdfDoc.embedPng(
-    fs.readFileSync(path.join(__dirname, '../../VIVID_FRONTEND/public/Pasted image.png')),
-  );
+  const headerImagePath = options.headerImagePath
+    || process.env.FRONT_SHEET_HEADER_PATH
+    || path.join(__dirname, '../../VIVID_FRONTEND/public/Pasted image.png');
+  let frontSheetHeader = null;
+  try {
+    frontSheetHeader = await pdfDoc.embedPng(fs.readFileSync(headerImagePath));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    // Production deploys the backend independently from the frontend. Keep PDF
+    // generation available even when the optional frontend artwork is absent.
+  }
   const black = rgb(0, 0, 0);
   const white = rgb(1, 1, 1);
   const salesFill = rgb(0.94, 0.93, 0.88);
@@ -1436,9 +1445,16 @@ async function buildPoFrontSheetPdf(request, sheet) {
     cursor -= height;
   };
 
-  // Branded heading supplied for the approved front-sheet format.
+  // Branded heading supplied for the approved front-sheet format. The text
+  // fallback also keeps downloads working in backend-only deployments.
   page.drawRectangle({ x: left, y: cursor - 62, width: tableWidth, height: 62, color: white, borderColor: black, borderWidth: 0.35 });
-  page.drawImage(frontSheetHeader, { x: left, y: cursor - 62, width: tableWidth, height: 62 });
+  if (frontSheetHeader) {
+    page.drawImage(frontSheetHeader, { x: left, y: cursor - 62, width: tableWidth, height: 62 });
+  } else {
+    page.drawText('VIVID', { x: left + 18, y: cursor - 39, size: 26, font: bold, color: rgb(0.06, 0.32, 0.55) });
+    page.drawText('ELECTROMECH LIMITED', { x: left + 118, y: cursor - 31, size: 13, font: bold, color: black });
+    page.drawText('PROJECT COMMERCIAL CLOSURE', { x: left + 118, y: cursor - 47, size: 8, font: regular, color: black });
+  }
   cursor -= 62;
 
   const documentDate = poDate(sales.po_date || sheet.updated_at);

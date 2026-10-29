@@ -77,6 +77,7 @@ function quotationSelect(whereClause = '', orderClause = '') {
       REGEXP_REPLACE(q.quotation_number, '-R[0-9]+$', '', 'i') AS quotation_number,
       l.assigned_to,
       NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT AS sales_owner_id,
+      (SELECT c.region FROM customers c WHERE c.id = l.customer_id) AS region,
       l.project_name,
       l.lead_status,
       l.lead_source,
