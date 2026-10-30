@@ -288,7 +288,7 @@ function customerValues(customerData) {
     nullablePhone(customerData.alternate_contact_phone, 'Alternate phone'),
     alternateEmail,
     nullableString(customerData.remarks, 'Remarks', 5000),
-    nullableString(customerData.region, 'Region', 100),
+    requiredString(customerData.region, 'Territory', 100),
   ];
 }
 

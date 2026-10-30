@@ -122,7 +122,7 @@ function canManageTaskSchedule(task, user) {
 }
 
 async function retrieveTasks(user) {
-  const canViewAll = ['admin', 'sales_head'].includes(user?.role);
+  const canViewAll = TASK_MANAGER_ROLES.has(roleOf(user));
   const result = await pool.query(
     `SELECT ${TASK_COLUMNS}
      FROM visit_tasks
