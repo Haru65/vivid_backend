@@ -621,8 +621,8 @@ async function retrieveLeadFollowups(leadId, user) {
 
 async function createLeadFollowup(leadId, followupData, user) {
   const lead = await leadForAccess(leadId, user);
-  if (!['admin', 'sales_head'].includes(roleOf(user))) {
-    throw Object.assign(new Error('Only Admin or Sales Head can assign follow-ups.'), { statusCode: 403 });
+  if (!['admin', 'sales_head', 'sales_engineer'].includes(roleOf(user))) {
+    throw Object.assign(new Error('Only Admin, Sales Head, or Sales Engineer can assign follow-ups.'), { statusCode: 403 });
   }
   const values = normalizeFollowup(followupData);
   if (values.followupType === 'Meeting' && values.status === 'Completed') {
@@ -632,6 +632,9 @@ async function createLeadFollowup(leadId, followupData, user) {
     id: lead.sales_owner_id || user?.id,
     name: lead.assigned_to || actorName(user),
   });
+  if (roleOf(user) === 'sales_engineer' && String(assignee.id) !== String(user?.id || '')) {
+    throw Object.assign(new Error('Sales Engineers can assign follow-ups only to themselves.'), { statusCode: 403 });
+  }
   if (!canReceiveLeadFollowup(lead, assignee)) {
     throw validationError('Assign the follow-up to the lead owner or a user with team lead access.');
   }
@@ -771,8 +774,19 @@ async function completeLeadFollowup(leadId, followupId, completionData, user) {
 
 async function cancelLeadFollowup(leadId, followupId, user) {
   const lead = await leadForAccess(leadId, user);
-  if (!['admin', 'sales_head'].includes(roleOf(user))) {
-    throw Object.assign(new Error('Only Admin or Sales Head can cancel a follow-up assignment.'), { statusCode: 403 });
+  const existing = await pool.query(
+    `SELECT ${followupColumns()}
+     FROM lead_followups f
+     WHERE f.id = $1 AND f.lead_id = $2`,
+    [followupId, lead.id],
+  );
+  const current = existing.rows[0] || null;
+  if (!current) return null;
+  const canManageAll = ['admin', 'sales_head'].includes(roleOf(user));
+  const canManageOwn = roleOf(user) === 'sales_engineer'
+    && String(current.assigned_to_user_id || '') === String(user?.id || '');
+  if (!canManageAll && !canManageOwn) {
+    throw Object.assign(new Error('Sales Engineers can cancel only their own follow-ups.'), { statusCode: 403 });
   }
   const result = await pool.query(
     `UPDATE lead_followups

@@ -25,3 +25,20 @@ test('frontsheet PDF generation works without the optional frontend header artwo
   assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
   assert.ok(bytes.length > 1000);
 });
+
+test('frontsheet PDF uses backend-owned branded artwork by default', async () => {
+  const pdf = await buildPoFrontSheetPdf({
+    id: 43,
+    company_name: 'Example Customer',
+    enquiry_product: 'Control Panel',
+    quotation_number: 'Q-43',
+    quotation_total: 125000,
+  }, {
+    sales_data: { po_number: 'PO/43', client_name: 'Example Customer' },
+    estimation_data: {},
+  });
+
+  const bytes = Buffer.from(pdf);
+  assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
+  assert.ok(bytes.length > 100000, 'expected the backend branding image to be embedded');
+});

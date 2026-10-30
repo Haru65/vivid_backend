@@ -5,7 +5,16 @@ const { logLeadActivity } = require('../controller/leads');
 const { createNotification, notifyRole, notifyUserId } = require('./notificationService');
 const { getMasterSettings } = require('../controller/settings');
 const { sendEmail } = require('./emailService');
-const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+  pushGraphicsState,
+  popGraphicsState,
+  rectangle,
+  clip,
+  endPath,
+} = require('pdf-lib');
 const fs = require('fs');
 const path = require('path');
 
@@ -1351,16 +1360,22 @@ async function buildPoFrontSheetPdf(request, sheet, options = {}) {
   const page = pdfDoc.addPage([612, 792]);
   const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const headerImagePath = options.headerImagePath
-    || process.env.FRONT_SHEET_HEADER_PATH
-    || path.join(__dirname, '../../VIVID_FRONTEND/public/Pasted image.png');
+  const configuredHeaderPath = options.headerImagePath || process.env.FRONT_SHEET_HEADER_PATH;
+  const headerImagePaths = configuredHeaderPath
+    ? [configuredHeaderPath]
+    : [
+      path.join(__dirname, '../public/Pasted image.png'),
+      path.join(__dirname, '../../VIVID_FRONTEND/public/Pasted image.png'),
+      path.join(__dirname, '../public/base_image.png'),
+    ];
   let frontSheetHeader = null;
-  try {
-    frontSheetHeader = await pdfDoc.embedPng(fs.readFileSync(headerImagePath));
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-    // Production deploys the backend independently from the frontend. Keep PDF
-    // generation available even when the optional frontend artwork is absent.
+  for (const headerImagePath of headerImagePaths) {
+    try {
+      frontSheetHeader = await pdfDoc.embedPng(fs.readFileSync(headerImagePath));
+      break;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
   }
   const black = rgb(0, 0, 0);
   const white = rgb(1, 1, 1);
@@ -1449,7 +1464,28 @@ async function buildPoFrontSheetPdf(request, sheet, options = {}) {
   // fallback also keeps downloads working in backend-only deployments.
   page.drawRectangle({ x: left, y: cursor - 62, width: tableWidth, height: 62, color: white, borderColor: black, borderWidth: 0.35 });
   if (frontSheetHeader) {
-    page.drawImage(frontSheetHeader, { x: left, y: cursor - 62, width: tableWidth, height: 62 });
+    const headerRatio = frontSheetHeader.width / frontSheetHeader.height;
+    if (headerRatio >= 4) {
+      page.drawImage(frontSheetHeader, { x: left, y: cursor - 62, width: tableWidth, height: 62 });
+    } else {
+      // The backend stationery is a full-page image. Crop its branded top edge
+      // into the frontsheet header so backend-only deployments retain branding.
+      const scaledHeight = tableWidth * (frontSheetHeader.height / frontSheetHeader.width);
+      const sourceTopOffset = 20 * (tableWidth / frontSheetHeader.width);
+      page.pushOperators(
+        pushGraphicsState(),
+        rectangle(left, cursor - 62, tableWidth, 62),
+        clip(),
+        endPath(),
+      );
+      page.drawImage(frontSheetHeader, {
+        x: left,
+        y: cursor + sourceTopOffset - scaledHeight,
+        width: tableWidth,
+        height: scaledHeight,
+      });
+      page.pushOperators(popGraphicsState());
+    }
   } else {
     page.drawText('VIVID', { x: left + 18, y: cursor - 39, size: 26, font: bold, color: rgb(0.06, 0.32, 0.55) });
     page.drawText('ELECTROMECH LIMITED', { x: left + 118, y: cursor - 31, size: 13, font: bold, color: black });
