@@ -1165,7 +1165,16 @@ async function createVisitTaskSchema() {
     );
   `);
 
-  await pool.query(`
+  const applyTaskSchemaChange = async (sql, label) => {
+    try {
+      await pool.query(sql);
+    } catch (error) {
+      if (error?.code !== '42501') throw error;
+      console.warn(`Skipping ${label}: the application database role does not own visit_tasks. Run the visit task migration as the table owner.`);
+    }
+  };
+
+  await applyTaskSchemaChange(`
     ALTER TABLE visit_tasks
     ADD COLUMN IF NOT EXISTS review TEXT,
     ADD COLUMN IF NOT EXISTS remark TEXT,
@@ -1177,20 +1186,20 @@ async function createVisitTaskSchema() {
     ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'normal',
     ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS all_day BOOLEAN NOT NULL DEFAULT FALSE;
-  `);
+  `, 'visit task column migration');
 
-  await pool.query(`
+  await applyTaskSchemaChange(`
     ALTER TABLE visit_tasks DROP CONSTRAINT IF EXISTS visit_tasks_priority_check;
     ALTER TABLE visit_tasks ADD CONSTRAINT visit_tasks_priority_check
       CHECK (priority IN ('low', 'normal', 'high', 'urgent'));
-  `);
+  `, 'visit task constraint migration');
 
-  await pool.query(`
+  await applyTaskSchemaChange(`
     CREATE INDEX IF NOT EXISTS visit_tasks_meeting_at_idx ON visit_tasks (meeting_at);
     CREATE INDEX IF NOT EXISTS visit_tasks_status_idx ON visit_tasks (status);
     CREATE INDEX IF NOT EXISTS visit_tasks_created_by_idx ON visit_tasks (created_by_user_id);
     CREATE INDEX IF NOT EXISTS visit_tasks_planning_idx ON visit_tasks (created_by_user_id, sort_order, meeting_at);
-  `);
+  `, 'visit task index migration');
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS task_planning_reminders (
