@@ -4,6 +4,8 @@ const path = require('node:path');
 const test = require('node:test');
 
 const quotations = require('../controller/quotations');
+const tasks = require('../controller/tasks');
+const { normalizeMasterSettings } = require('../controller/settings');
 const { hashPassword, USER_ROLES, verifyPassword } = require('../controller/userManagement');
 const { validateAuthConfiguration } = require('../middleware/auth');
 const { normalizePostalResponse, listDistrictsForState, listCitiesForDistrict } = require('../services/postalService');
@@ -20,6 +22,47 @@ test('quotation controller exposes every routed operation', () => {
   ]) {
     assert.equal(typeof quotations[operation], 'function', `${operation} must be exported`);
   }
+});
+
+test('visit tasks expose persistent CRUD operations and an authenticated route', () => {
+  for (const operation of ['retrieveTasks', 'createTask', 'updateTask', 'updateTaskStatus', 'updateTaskReview', 'rescheduleTask', 'deleteTask']) {
+    assert.equal(typeof tasks[operation], 'function', `${operation} must be exported`);
+  }
+
+  const serverSource = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+  const routeSource = fs.readFileSync(path.join(__dirname, '../routes/tasks.js'), 'utf8');
+  const schemaSource = fs.readFileSync(path.join(__dirname, '../config/db_schema.js'), 'utf8');
+  const controllerSource = fs.readFileSync(path.join(__dirname, '../controller/tasks.js'), 'utf8');
+
+  assert.match(serverSource, /app\.use\('\/tasks', taskRouter\)/);
+  assert.match(routeSource, /requireRoles\('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales'\)/);
+  assert.match(schemaSource, /CREATE TABLE IF NOT EXISTS visit_tasks/);
+  assert.match(controllerSource, /Meeting date and time must be in the future/);
+  assert.match(controllerSource, /FROM customers/);
+  assert.match(controllerSource, /updateTaskReview/);
+  assert.match(controllerSource, /created_by_user_id = \$2/);
+  assert.match(controllerSource, /sort_order/);
+  assert.match(controllerSource, /priority/);
+  assert.match(controllerSource, /all_day/);
+  assert.match(controllerSource, /next_activity/);
+  assert.match(controllerSource, /Managers may only reschedule or cancel another engineer/);
+  assert.match(controllerSource, /A cancelled task cannot be rescheduled/);
+  assert.match(controllerSource, /TASK_MANAGER_ROLES/);
+  assert.match(routeSource, /\/:id\/reschedule/);
+});
+
+test('dashboard master settings keep supported role widgets and reject unknown values', () => {
+  const settings = normalizeMasterSettings({
+    dashboard_widgets: {
+      admin: ['executive_metrics', 'sales_funnel', 'unknown_widget', 'sales_funnel'],
+      sales_head: [],
+    },
+  });
+
+  assert.deepEqual(settings.dashboard_widgets.admin, ['executive_metrics', 'sales_funnel']);
+  assert.deepEqual(settings.dashboard_widgets.sales_head, []);
+  assert.ok(settings.dashboard_widgets.erp.includes('project_health'));
+  assert.equal(Object.hasOwn(settings.dashboard_widgets, 'unknown_role'), false);
 });
 
 test('password hashing accepts valid passwords and rejects invalid credentials', () => {

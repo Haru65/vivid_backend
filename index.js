@@ -3,6 +3,7 @@ const leadRouter = require('./routes/lead_dashboard');
 const customerRouter = require('./routes/customers');
 const quotationRouter = require('./routes/quotations');
 const meetingRouter = require('./routes/meetings');
+const taskRouter = require('./routes/tasks');
 const approvalRouter = require('./routes/approvals');
 const estimationRouter = require('./routes/estimation');
 const notificationRouter = require('./routes/notifications');
@@ -15,6 +16,7 @@ const authRouter = require('./routes/auth');
 const profileRouter = require('./routes/profileRoute');
 const { createSchemas } = require('./config/db_schema');
 const { authenticateToken, validateAuthConfiguration } = require('./middleware/auth');
+const { sendFridayTaskPlanningReminders } = require('./services/taskReminderService');
 
 
 const dotenv = require('dotenv');
@@ -70,6 +72,7 @@ app.use('/leads', leadRouter);
 app.use('/customers', customerRouter);
 app.use('/quotations', quotationRouter);
 app.use('/meetings', meetingRouter);
+app.use('/tasks', taskRouter);
 app.use('/approvals', approvalRouter);
 app.use('/estimation', estimationRouter);
 app.use('/notifications', notificationRouter);
@@ -97,6 +100,9 @@ async function startServer() {
   try {
     validateAuthConfiguration();
     await createSchemas();
+    const runTaskPlanningReminders = () => sendFridayTaskPlanningReminders().catch((error) => console.error('Unable to send Friday task planning reminders:', error));
+    runTaskPlanningReminders();
+    setInterval(runTaskPlanningReminders, 60 * 60 * 1000).unref();
     const server = app.listen(port, () => {
       console.log(`Server is running on http://localhost:${port}`);
     });

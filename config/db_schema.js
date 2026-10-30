@@ -1134,6 +1134,77 @@ async function createMeetingSchema() {
   console.log('Meeting schema created successfully.');
 }
 
+async function createVisitTaskSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS visit_tasks (
+      id SERIAL PRIMARY KEY,
+      customer_id INTEGER NOT NULL,
+      client_name VARCHAR(255) NOT NULL,
+      company_name VARCHAR(255) NOT NULL,
+      contact_number VARCHAR(30),
+      location VARCHAR(500) NOT NULL,
+      reason_for_visit TEXT NOT NULL,
+      meeting_at TIMESTAMPTZ NOT NULL,
+      all_day BOOLEAN NOT NULL DEFAULT FALSE,
+      review TEXT,
+      remark TEXT,
+      next_activity TEXT,
+      completion_latitude NUMERIC(10, 7),
+      completion_longitude NUMERIC(10, 7),
+      completion_accuracy_m NUMERIC(10, 2),
+      completed_at TIMESTAMPTZ,
+      priority VARCHAR(20) NOT NULL DEFAULT 'normal'
+        CHECK (priority IN ('low', 'normal', 'high', 'urgent')),
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      status VARCHAR(20) NOT NULL DEFAULT 'todo'
+        CHECK (status IN ('todo', 'in_progress', 'completed', 'cancelled')),
+      created_by_user_id BIGINT NOT NULL,
+      created_by_name VARCHAR(255) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    ALTER TABLE visit_tasks
+    ADD COLUMN IF NOT EXISTS review TEXT,
+    ADD COLUMN IF NOT EXISTS remark TEXT,
+    ADD COLUMN IF NOT EXISTS next_activity TEXT,
+    ADD COLUMN IF NOT EXISTS completion_latitude NUMERIC(10, 7),
+    ADD COLUMN IF NOT EXISTS completion_longitude NUMERIC(10, 7),
+    ADD COLUMN IF NOT EXISTS completion_accuracy_m NUMERIC(10, 2),
+    ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'normal',
+    ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS all_day BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE visit_tasks DROP CONSTRAINT IF EXISTS visit_tasks_priority_check;
+    ALTER TABLE visit_tasks ADD CONSTRAINT visit_tasks_priority_check
+      CHECK (priority IN ('low', 'normal', 'high', 'urgent'));
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS visit_tasks_meeting_at_idx ON visit_tasks (meeting_at);
+    CREATE INDEX IF NOT EXISTS visit_tasks_status_idx ON visit_tasks (status);
+    CREATE INDEX IF NOT EXISTS visit_tasks_created_by_idx ON visit_tasks (created_by_user_id);
+    CREATE INDEX IF NOT EXISTS visit_tasks_planning_idx ON visit_tasks (created_by_user_id, sort_order, meeting_at);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS task_planning_reminders (
+      id SERIAL PRIMARY KEY,
+      recipient_user_id BIGINT NOT NULL,
+      week_start DATE NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (recipient_user_id, week_start)
+    );
+  `);
+
+  console.log('Visit task schema created successfully.');
+}
+
 async function createSettingsSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS system_settings (
@@ -1222,6 +1293,7 @@ async function createSchemas() {
   await createCustomerSchema();
   await createQuotationSchema();
   await createMeetingSchema();
+  await createVisitTaskSchema();
   await createSettingsSchema();
   await createNegotiationApprovalSchema();
   await createNotificationSchema();
@@ -1231,4 +1303,4 @@ async function createSchemas() {
   await createLeadChangeRequestSchema();
 }
 
-module.exports = { createUserSchema, createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createNotificationSchema, createEstimationRequestSchema, createPoClosureSheetSchema, createMeetingSchema, createSettingsSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createLeadChangeRequestSchema, createSchemas };
+module.exports = { createUserSchema, createLeadSchema, createLeadActivitySchema, createLeadFollowupSchema, createCustomerSchema, createQuotationSchema, createNotificationSchema, createEstimationRequestSchema, createPoClosureSheetSchema, createMeetingSchema, createVisitTaskSchema, createSettingsSchema, createNegotiationApprovalSchema, createHandoverProjectSchema, createLeadChangeRequestSchema, createSchemas };
