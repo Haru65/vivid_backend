@@ -33,3 +33,13 @@ test('Admin activity trail remains unrestricted', async () => {
 
   assert.equal(db.calls.some((call) => /activity_type IN \('approval_requested', 'approval'\)/.test(call.sql)), false);
 });
+
+test('Estimation Head team dashboard is restricted to the selected engineer', async () => {
+  const db = database();
+  await listActivityLogs({ scope: 'team_dashboard', actor_id: '14' }, { id: 3, role: 'estimation_head' }, db);
+
+  assert.equal(db.calls.some((call) => /activity_type IN \('approval_requested', 'approval'\)/.test(call.sql)), false);
+  assert.match(db.calls[0].sql, /a\.actor_user_id = \$1/);
+  assert.match(db.calls[0].sql, /u\.role IN \('salesperson', 'sales_engineer', 'presales', 'estimation_engineer'\)/);
+  assert.equal(db.calls.every((call) => call.values.includes(14)), true);
+});

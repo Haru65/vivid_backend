@@ -34,10 +34,20 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
     return `$${values.length}`;
   };
 
-  // Estimation Heads only need the approval audit trail. Keep this restriction
-  // server-side so query parameters cannot expose unrelated workspace activity.
-  const approvalOnly = user.role === 'estimation_head';
+  const actorIdText = String(query.actor_id || '').trim();
+  const actorId = /^\d+$/.test(actorIdText) ? Number(actorIdText) : 0;
+  const teamDashboard = user.role === 'estimation_head'
+    && query.scope === 'team_dashboard'
+    && actorId > 0;
+
+  // The general Estimation Head log remains approval-only. The dashboard may
+  // request the selected engineer's activity, but only for supported team roles.
+  const approvalOnly = user.role === 'estimation_head' && !teamDashboard;
   if (approvalOnly) conditions.push(`a.activity_type IN ('approval_requested', 'approval')`);
+  if (teamDashboard) {
+    conditions.push(`a.actor_user_id = ${addValue(actorId)}`);
+    conditions.push(`u.role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_engineer')`);
+  }
 
   const search = String(query.q || '').trim().slice(0, 200);
   if (search) {
@@ -96,16 +106,23 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
     pageValues,
   );
 
+  const metadataWhere = approvalOnly
+    ? " WHERE activity_type IN ('approval_requested', 'approval')"
+    : teamDashboard
+      ? " WHERE actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_engineer'))"
+      : '';
+  const metadataValues = teamDashboard ? [actorId] : [];
   const [typesResult, actorsResult] = await Promise.all([
-    db.query(`SELECT DISTINCT activity_type FROM lead_activities${approvalOnly ? " WHERE activity_type IN ('approval_requested', 'approval')" : ''} ORDER BY activity_type ASC`),
+    db.query(`SELECT DISTINCT activity_type FROM lead_activities${metadataWhere} ORDER BY activity_type ASC`, metadataValues),
     db.query(`
       SELECT actor_name, MIN(actor_user_id) AS actor_user_id
       FROM lead_activities
       WHERE NULLIF(TRIM(actor_name), '') IS NOT NULL
         ${approvalOnly ? "AND activity_type IN ('approval_requested', 'approval')" : ''}
+        ${teamDashboard ? "AND actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_engineer'))" : ''}
       GROUP BY actor_name
       ORDER BY actor_name ASC
-    `),
+    `, metadataValues),
   ]);
 
   const total = countResult.rows[0]?.total || 0;
