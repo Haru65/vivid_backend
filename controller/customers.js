@@ -252,7 +252,8 @@ function customerValues(customerData) {
   if (amcStartDate && amcEndDate && amcEndDate < amcStartDate) {
     throw validationError('AMC end date must be on or after the AMC start date.');
   }
-  const contactEmail = nullableEmail(customerData.contact_person_email, 'Primary contact email');
+  const contactEmail = requiredString(customerData.contact_person_email, 'Primary contact email', 255).toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(contactEmail)) throw validationError('Primary contact email must be valid.');
   const alternateEmail = nullableEmail(customerData.alternate_contact_email, 'Alternate contact email');
 
   return [
@@ -265,10 +266,10 @@ function customerValues(customerData) {
     nullableString(customerData.segment, 'Segment', 100),
     nullableString(customerData.site_location, 'Site location', 255),
     nullableString(customerData.consultant, 'Consultant', 255),
-    nullableString(customerData.contact_person_name, 'Contact person name', 255),
+    requiredString(customerData.contact_person_name, 'Primary contact name', 255),
     nullablePhone(customerData.contact_person_phone, 'Contact person phone'),
-    contactEmail?.toLowerCase() || null,
-    nullableString(customerData.billing_address, 'Billing address', 5000),
+    contactEmail,
+    requiredString(customerData.billing_address, 'Billing address', 5000),
     nullableString(customerData.shipping_address, 'Shipping address', 5000),
     nullableString(customerData.state, 'State', 100),
     effectiveAmcStatus(requestedAmcStatus, amcEndDate),

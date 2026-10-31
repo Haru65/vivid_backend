@@ -34,7 +34,7 @@ const DEFAULT_DASHBOARD_WIDGETS = {
 };
 
 const DEFAULT_MASTER_SETTINGS = {
-  industry_types: ['Manufacturing', 'Pharma', 'Food', 'Chemical', 'Textile', 'Automotive', 'Infrastructure', 'OEM', 'EPC'],
+  segments: ['Infra - Port, Road, Airport etc', 'Industry - Manufacturing', 'Building - Hospital', 'Building - IT Office', 'Infra - Metro/Rail', 'Building - Resi Mixuse', 'Wind-Solar Park', 'Water', 'Data Center'],
   lead_sources: ['Website', 'Referral', 'IndiaMART', 'TradeIndia', 'Exhibition', 'Cold Call', 'Existing Customer', 'WhatsApp', 'Email'],
   product_categories: ['PCC Panel', 'MCC Panel', 'APFC Panel', 'VFD Panel', 'AMF Panel', 'HT Panel', 'LT Panel', 'Bus Duct', 'Control Panel', ...DEAL_PRODUCTS],
   quotation_terms: ['50% advance with PO, balance before dispatch', 'Delivery within 4-6 weeks after technical clearance', 'Warranty 12 months from commissioning or 18 months from dispatch', 'Offer valid for 30 days'],
