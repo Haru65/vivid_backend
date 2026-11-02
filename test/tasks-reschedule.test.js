@@ -76,3 +76,16 @@ test('admin reschedule rejects an invalid meeting date before updating', async (
   );
   assert.equal(calls.length, 1);
 });
+
+test('task completion rejects an imprecise GPS fix', async () => {
+  const { controller, calls } = loadController(engineerTask);
+  await assert.rejects(
+    controller.completeTask(
+      engineerTask.id,
+      { latitude: 19.076, longitude: 72.8777, accuracy_m: 50000 },
+      { id: engineerTask.created_by_user_id, role: 'sales_engineer' },
+    ),
+    { statusCode: 400, message: /within 100 metres/ },
+  );
+  assert.equal(calls.length, 1);
+});

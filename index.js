@@ -16,7 +16,7 @@ const authRouter = require('./routes/auth');
 const profileRouter = require('./routes/profileRoute');
 const { createSchemas } = require('./config/db_schema');
 const { authenticateToken, validateAuthConfiguration } = require('./middleware/auth');
-const { sendFridayTaskPlanningReminders } = require('./services/taskReminderService');
+const { sendFridayTaskPlanningReminders, sendMondayTaskReviewReminders } = require('./services/taskReminderService');
 
 
 const dotenv = require('dotenv');
@@ -100,7 +100,10 @@ async function startServer() {
   try {
     validateAuthConfiguration();
     await createSchemas();
-    const runTaskPlanningReminders = () => sendFridayTaskPlanningReminders().catch((error) => console.error('Unable to send Friday task planning reminders:', error));
+    const runTaskPlanningReminders = () => Promise.all([
+      sendFridayTaskPlanningReminders(),
+      sendMondayTaskReviewReminders(),
+    ]).catch((error) => console.error('Unable to send task planning reminders:', error));
     runTaskPlanningReminders();
     setInterval(runTaskPlanningReminders, 60 * 60 * 1000).unref();
     const server = app.listen(port, () => {

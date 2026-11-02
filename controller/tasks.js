@@ -85,7 +85,7 @@ function completionLocation(data = {}) {
   const accuracy = Number(data.accuracy_m);
   if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) throw httpError('A valid completion latitude is required.');
   if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) throw httpError('A valid completion longitude is required.');
-  if (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 100000) throw httpError('A valid GPS accuracy is required.');
+  if (!Number.isFinite(accuracy) || accuracy < 0 || accuracy > 100) throw httpError('GPS accuracy must be within 100 metres. Move outdoors, enable precise location, and try again.');
   return { latitude, longitude, accuracy };
 }
 
