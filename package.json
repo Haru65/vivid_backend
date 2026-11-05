@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "db:reset-import": "node scripts/reset-and-import-customers.js",
     "test": "node --test test/*.test.js",
     "start": "node index.js"
   },
@@ -11,6 +12,7 @@
   "license": "ISC",
   "dependencies": {
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "india-pincode": "^2.5.9",
     "jsonwebtoken": "^9.0.3",
