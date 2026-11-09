@@ -40,12 +40,14 @@ test('visit tasks expose persistent CRUD operations and an authenticated route',
   assert.match(controllerSource, /Meeting date and time must be in the future/);
   assert.match(controllerSource, /FROM customers/);
   assert.match(controllerSource, /updateTaskReview/);
-  assert.match(controllerSource, /created_by_user_id = \$2/);
+  assert.match(controllerSource, /COALESCE\(assigned_to_user_id, created_by_user_id\) = \$2/);
+  assert.match(controllerSource, /canonicalAssignee/);
+  assert.match(controllerSource, /New visit task assigned/);
   assert.match(controllerSource, /sort_order/);
   assert.match(controllerSource, /priority/);
   assert.match(controllerSource, /all_day/);
   assert.match(controllerSource, /next_activity/);
-  assert.match(controllerSource, /Managers may only reschedule or cancel another engineer/);
+  assert.match(controllerSource, /Only the assigned Sales Engineer or a Sales Manager can reschedule/);
   assert.match(controllerSource, /A cancelled task cannot be rescheduled/);
   assert.match(controllerSource, /TASK_MANAGER_ROLES/);
   assert.match(routeSource, /\/:id\/reschedule/);

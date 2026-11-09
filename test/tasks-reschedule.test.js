@@ -89,3 +89,17 @@ test('task completion rejects an imprecise GPS fix', async () => {
   );
   assert.equal(calls.length, 1);
 });
+
+test('task creator cannot complete a task assigned to another engineer', async () => {
+  const assignedTask = { ...engineerTask, created_by_user_id: 2, assigned_to_user_id: 7, assigned_to_name: 'Sales Engineer' };
+  const { controller, calls } = loadController(assignedTask);
+  await assert.rejects(
+    controller.completeTask(
+      assignedTask.id,
+      { latitude: 19.076, longitude: 72.8777, accuracy_m: 20 },
+      { id: assignedTask.created_by_user_id, role: 'sales_head' },
+    ),
+    { statusCode: 403, message: /assigned Sales Engineer/ },
+  );
+  assert.equal(calls.length, 1);
+});

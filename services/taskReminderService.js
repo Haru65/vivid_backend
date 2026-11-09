@@ -33,7 +33,7 @@ async function sendMondayTaskReviewReminders(db = pool, now = new Date()) {
   const weekStart = today.date;
   const [heads, summary] = await Promise.all([
     db.query(`SELECT id, first_name, last_name FROM users WHERE is_active = TRUE AND role = 'sales_head'`),
-    db.query(`SELECT COUNT(*)::int AS visits, COUNT(DISTINCT created_by_user_id)::int AS engineers FROM visit_tasks WHERE meeting_at >= $1::date AND meeting_at < $1::date + INTERVAL '7 days' AND status <> 'cancelled'`, [weekStart]),
+    db.query(`SELECT COUNT(*)::int AS visits, COUNT(DISTINCT COALESCE(assigned_to_user_id, created_by_user_id))::int AS engineers FROM visit_tasks WHERE meeting_at >= $1::date AND meeting_at < $1::date + INTERVAL '7 days' AND status <> 'cancelled'`, [weekStart]),
   ]);
   const visits = Number(summary.rows[0]?.visits || 0);
   const engineers = Number(summary.rows[0]?.engineers || 0);

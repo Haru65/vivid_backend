@@ -1160,6 +1160,11 @@ async function createVisitTaskSchema() {
         CHECK (status IN ('todo', 'in_progress', 'completed', 'cancelled')),
       created_by_user_id BIGINT NOT NULL,
       created_by_name VARCHAR(255) NOT NULL,
+      assigned_to_user_id BIGINT,
+      assigned_to_name VARCHAR(255),
+      assigned_by_user_id BIGINT,
+      assigned_by_name VARCHAR(255),
+      assigned_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -1185,8 +1190,26 @@ async function createVisitTaskSchema() {
     ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'normal',
     ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS all_day BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS all_day BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS assigned_to_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS assigned_to_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS assigned_by_user_id BIGINT,
+    ADD COLUMN IF NOT EXISTS assigned_by_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
   `, 'visit task column migration');
+
+  await applyTaskSchemaChange(`
+    UPDATE visit_tasks
+    SET assigned_to_user_id = COALESCE(assigned_to_user_id, created_by_user_id),
+        assigned_to_name = COALESCE(NULLIF(assigned_to_name, ''), created_by_name),
+        assigned_by_user_id = COALESCE(assigned_by_user_id, created_by_user_id),
+        assigned_by_name = COALESCE(NULLIF(assigned_by_name, ''), created_by_name),
+        assigned_at = COALESCE(assigned_at, created_at, CURRENT_TIMESTAMP)
+    WHERE assigned_to_user_id IS NULL
+       OR NULLIF(assigned_to_name, '') IS NULL
+       OR assigned_by_user_id IS NULL
+       OR assigned_at IS NULL;
+  `, 'visit task assignment backfill');
 
   await applyTaskSchemaChange(`
     ALTER TABLE visit_tasks DROP CONSTRAINT IF EXISTS visit_tasks_priority_check;
@@ -1198,6 +1221,7 @@ async function createVisitTaskSchema() {
     CREATE INDEX IF NOT EXISTS visit_tasks_meeting_at_idx ON visit_tasks (meeting_at);
     CREATE INDEX IF NOT EXISTS visit_tasks_status_idx ON visit_tasks (status);
     CREATE INDEX IF NOT EXISTS visit_tasks_created_by_idx ON visit_tasks (created_by_user_id);
+    CREATE INDEX IF NOT EXISTS visit_tasks_assigned_to_idx ON visit_tasks (assigned_to_user_id, status, meeting_at);
     CREATE INDEX IF NOT EXISTS visit_tasks_planning_idx ON visit_tasks (created_by_user_id, sort_order, meeting_at);
   `, 'visit task index migration');
 

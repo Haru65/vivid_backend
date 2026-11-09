@@ -23,6 +23,7 @@ const SALES_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salespers
 const ESTIMATION_ROLES = new Set(['admin', 'estimation_head', 'estimation_engineer', 'presales']);
 const ESTIMATION_CONTRIBUTOR_ROLES = new Set(['estimation_engineer', 'presales']);
 const INDIVIDUAL_SALES_ROLES = new Set(['sales_engineer', 'salesperson']);
+const ESTIMATION_WORKFLOW_ROLES = new Set(['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales', 'estimation_head', 'estimation_engineer']);
 let uploadedQuotationBackfillComplete = false;
 
 function appError(message, statusCode = 400) {
@@ -993,7 +994,7 @@ async function discardRequest(id, data, user) {
 }
 
 async function setEstimationWorkflowState(id, data, user) {
-  if (!SALES_ROLES.has(user?.role) && !ESTIMATION_ROLES.has(user?.role)) {
+  if (!ESTIMATION_WORKFLOW_ROLES.has(user?.role)) {
     throw appError('Only sales or estimation users can update this workflow.', 403);
   }
   const action = String(data?.action || '').trim().toLowerCase();

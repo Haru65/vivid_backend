@@ -23,6 +23,11 @@ const TASK_COLUMNS = `
   status,
   created_by_user_id,
   created_by_name,
+  assigned_to_user_id,
+  assigned_to_name,
+  assigned_by_user_id,
+  assigned_by_name,
+  assigned_at,
   created_at,
   updated_at
 `;
@@ -30,6 +35,7 @@ const TASK_COLUMNS = `
 const TASK_STATUSES = new Set(['todo', 'in_progress', 'completed', 'cancelled']);
 const TASK_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
 const TASK_MANAGER_ROLES = new Set(['admin', 'sales_head']);
+const TASK_ASSIGNEE_ROLES = new Set(['sales_engineer', 'salesperson', 'presales']);
 
 function httpError(message, statusCode = 400) {
   const error = new Error(message);
@@ -105,8 +111,30 @@ async function canonicalCustomer(id) {
   return result.rows[0];
 }
 
+async function canonicalAssignee(value, user) {
+  if (!TASK_MANAGER_ROLES.has(roleOf(user))) {
+    if (!TASK_ASSIGNEE_ROLES.has(roleOf(user))) throw httpError('Only a Sales Engineer can own a visit task.', 403);
+    return { id: Number(user.id), name: user.name };
+  }
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) throw httpError('Choose a Sales Engineer for this task.');
+  const result = await pool.query(
+    `SELECT id, first_name, last_name, role
+     FROM users
+     WHERE id = $1
+       AND is_active = TRUE
+       AND role IN ('sales_engineer', 'salesperson', 'presales')`,
+    [id],
+  );
+  if (!result.rows[0]) throw httpError('The selected Sales Engineer is not active or cannot receive tasks.');
+  return {
+    id: Number(result.rows[0].id),
+    name: [result.rows[0].first_name, result.rows[0].last_name].filter(Boolean).join(' '),
+  };
+}
+
 function isTaskOwner(task, user) {
-  return String(task?.created_by_user_id || '') === String(user?.id || '');
+  return String(task?.assigned_to_user_id || task?.created_by_user_id || '') === String(user?.id || '');
 }
 
 function roleOf(user) {
@@ -114,7 +142,7 @@ function roleOf(user) {
 }
 
 function canEditTask(task, user) {
-  return isTaskOwner(task, user);
+  return TASK_MANAGER_ROLES.has(roleOf(user)) || isTaskOwner(task, user);
 }
 
 function canManageTaskSchedule(task, user) {
@@ -126,7 +154,7 @@ async function retrieveTasks(user) {
   const result = await pool.query(
     `SELECT ${TASK_COLUMNS}
      FROM visit_tasks
-     WHERE ($1::boolean = TRUE OR created_by_user_id = $2)
+     WHERE ($1::boolean = TRUE OR COALESCE(assigned_to_user_id, created_by_user_id) = $2)
      ORDER BY
        CASE status WHEN 'todo' THEN 1 WHEN 'in_progress' THEN 2 WHEN 'completed' THEN 3 ELSE 4 END,
        sort_order ASC,
@@ -147,29 +175,40 @@ async function createTask(data, user) {
   const location = requiredText(data.location, 'Location', 500);
   const reason = requiredText(data.reason_for_visit, 'Reason for visit', 5000);
   const meetingAt = futureTimestamp(data.meeting_at);
+  const assignee = await canonicalAssignee(data.assigned_to_user_id, user);
   const orderResult = await pool.query(
-    'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order FROM visit_tasks WHERE created_by_user_id = $1',
-    [user.id],
+    'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order FROM visit_tasks WHERE COALESCE(assigned_to_user_id, created_by_user_id) = $1',
+    [assignee.id],
   );
   const sortOrder = Number(orderResult.rows[0]?.next_order) || 1;
   const result = await pool.query(
     `INSERT INTO visit_tasks (
        customer_id, client_name, company_name, contact_number, location,
-       reason_for_visit, meeting_at, all_day, priority, sort_order, status, created_by_user_id, created_by_name
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'todo', $11, $12)
+       reason_for_visit, meeting_at, all_day, priority, sort_order, status, created_by_user_id, created_by_name,
+       assigned_to_user_id, assigned_to_name, assigned_by_user_id, assigned_by_name, assigned_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'todo', $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP)
      RETURNING ${TASK_COLUMNS}`,
     [selectedCustomer.id, selectedCustomer.contact_person_name, selectedCustomer.company_name,
       selectedCustomer.contact_person_phone || null, location, reason, meetingAt,
-      data.all_day === true, taskPriority(data.priority), sortOrder, user.id, user.name],
+      data.all_day === true, taskPriority(data.priority), sortOrder, user.id, user.name,
+      assignee.id, assignee.name, user.id, user.name],
   );
-  return result.rows[0];
+  const saved = result.rows[0];
+  if (String(assignee.id) !== String(user.id)) {
+    await notifyUserId(assignee.id, taskNotification(saved, 'New visit task assigned', `${user.name || 'Sales Head'} assigned you a visit with ${saved.company_name}.`));
+  }
+  return saved;
 }
 
 async function updateTask(id, data, user) {
   const existing = await retrieveTask(id);
   if (!existing) return null;
-  if (!canEditTask(existing, user)) throw httpError('Managers may only reschedule or cancel another engineer’s task.', 403);
+  if (!canEditTask(existing, user)) throw httpError('You can edit only tasks assigned to you.', 403);
   const selectedCustomer = await canonicalCustomer(customerId(data.customer_id));
+  const assignee = TASK_MANAGER_ROLES.has(roleOf(user))
+    ? await canonicalAssignee(data.assigned_to_user_id || existing.assigned_to_user_id || existing.created_by_user_id, user)
+    : { id: Number(existing.assigned_to_user_id || existing.created_by_user_id), name: existing.assigned_to_name || existing.created_by_name };
+  const assignmentChanged = String(assignee.id) !== String(existing.assigned_to_user_id || existing.created_by_user_id);
   const status = data.status || existing.status;
   if (!TASK_STATUSES.has(status)) throw httpError('Task status is invalid.');
   const result = await pool.query(
@@ -185,17 +224,29 @@ async function updateTask(id, data, user) {
          status = $9,
          priority = $10,
          sort_order = $11,
+         assigned_to_user_id = $12,
+         assigned_to_name = $13,
+         assigned_by_user_id = $14,
+         assigned_by_name = $15,
+         assigned_at = $16,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $12
+     WHERE id = $17
      RETURNING ${TASK_COLUMNS}`,
     [selectedCustomer.id, selectedCustomer.contact_person_name, selectedCustomer.company_name,
       selectedCustomer.contact_person_phone || null,
       requiredText(data.location, 'Location', 500),
       requiredText(data.reason_for_visit, 'Reason for visit', 5000),
       futureTimestamp(data.meeting_at), data.all_day === true, status, taskPriority(data.priority, existing.priority),
-      taskOrder(data.sort_order, existing.sort_order), id],
+      taskOrder(data.sort_order, existing.sort_order), assignee.id, assignee.name,
+      assignmentChanged ? user.id : (existing.assigned_by_user_id || existing.created_by_user_id),
+      assignmentChanged ? user.name : (existing.assigned_by_name || existing.created_by_name),
+      assignmentChanged ? new Date().toISOString() : (existing.assigned_at || existing.created_at || new Date().toISOString()), id],
   );
-  return result.rows[0];
+  const saved = result.rows[0];
+  if (assignmentChanged) {
+    await notifyUserId(assignee.id, taskNotification(saved, 'Visit task assigned to you', `${user.name || 'Sales Head'} assigned you a visit with ${saved.company_name}.`));
+  }
+  return saved;
 }
 
 async function updateTaskStatus(id, status, user) {
@@ -259,7 +310,7 @@ async function rescheduleTask(id, data, user) {
   if (!result.rows[0]) throw httpError('This task was cancelled before it could be rescheduled.', 409);
   const saved = result.rows[0];
   if (!isTaskOwner(existing, user)) {
-    await notifyUserId(existing.created_by_user_id, taskNotification(saved, 'Visit rescheduled', `${user.name || 'Sales manager'} rescheduled your visit with ${saved.company_name}.`));
+    await notifyUserId(existing.assigned_to_user_id || existing.created_by_user_id, taskNotification(saved, 'Visit rescheduled', `${user.name || 'Sales manager'} rescheduled your visit with ${saved.company_name}.`));
   }
   return saved;
 }
@@ -284,7 +335,7 @@ async function completeTask(id, data, user) {
   );
   if (!result.rows[0]) throw httpError('This task was cancelled before it could be completed.', 409);
   const saved = result.rows[0];
-  const notice = taskNotification(saved, 'Sales visit completed', `${user.name || saved.created_by_name} completed ${saved.company_name}. GPS location was captured.`);
+  const notice = taskNotification(saved, 'Sales visit completed', `${user.name || saved.assigned_to_name || saved.created_by_name} completed ${saved.company_name}. GPS location was captured.`);
   await Promise.all([notifyRole('sales_head', notice), notifyRole('admin', notice)]);
   return saved;
 }
@@ -292,7 +343,7 @@ async function completeTask(id, data, user) {
 async function deleteTask(id, user) {
   const existing = await retrieveTask(id);
   if (!existing) return null;
-  if (!canEditTask(existing, user)) throw httpError('Managers cannot delete another engineer’s task. Cancel it instead.', 403);
+  if (!isTaskOwner(existing, user)) throw httpError('Managers cannot delete another engineer’s task. Cancel it instead.', 403);
   const result = await pool.query('DELETE FROM visit_tasks WHERE id = $1 RETURNING id', [id]);
   return result.rows[0] || null;
 }
