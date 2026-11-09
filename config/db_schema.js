@@ -853,6 +853,8 @@ async function createEstimationRequestSchema() {
       estimation_head_name VARCHAR(255),
       assigned_engineer_id BIGINT,
       assigned_engineer_name VARCHAR(255),
+      estimation_priority_order INTEGER,
+      sales_priority_order INTEGER,
       current_stage VARCHAR(50) NOT NULL DEFAULT 'estimation_submitted',
       current_assignee_id BIGINT,
       status VARCHAR(50) NOT NULL DEFAULT 'submitted'
@@ -893,6 +895,8 @@ async function createEstimationRequestSchema() {
     ADD COLUMN IF NOT EXISTS sales_owner_id BIGINT,
     ADD COLUMN IF NOT EXISTS sales_head_id BIGINT,
     ADD COLUMN IF NOT EXISTS estimation_head_id BIGINT,
+    ADD COLUMN IF NOT EXISTS estimation_priority_order INTEGER,
+    ADD COLUMN IF NOT EXISTS sales_priority_order INTEGER,
     ADD COLUMN IF NOT EXISTS assignment_notes TEXT,
     ADD COLUMN IF NOT EXISTS review_notes TEXT,
     ADD COLUMN IF NOT EXISTS revision_notes TEXT,
@@ -903,6 +907,13 @@ async function createEstimationRequestSchema() {
     ADD COLUMN IF NOT EXISTS dropped_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS current_stage VARCHAR(50) NOT NULL DEFAULT 'estimation_submitted',
     ADD COLUMN IF NOT EXISTS current_assignee_id BIGINT;
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS estimation_requests_estimation_priority_idx
+      ON estimation_requests (assigned_engineer_id, estimation_priority_order);
+    CREATE INDEX IF NOT EXISTS estimation_requests_sales_priority_idx
+      ON estimation_requests (sales_owner_id, sales_priority_order);
   `);
 
 

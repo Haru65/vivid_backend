@@ -15,6 +15,7 @@ const {
   listEstimationRequests,
   markClientApproved,
   requestRevision,
+  reorderTeamPriorities,
   requestSalesRevision,
   savePoEstimation,
   sendUploadedRequestQuotation,
@@ -46,6 +47,14 @@ router.get('/', async (req, res) => {
     res.json(await listEstimationRequests(currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to retrieve estimation requests', error);
+  }
+});
+
+router.post('/priorities', async (req, res) => {
+  try {
+    res.json(await reorderTeamPriorities(req.body, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to save enquiry priorities', error);
   }
 });
 
@@ -153,6 +162,7 @@ router.post('/:id/quotation-pdf', express.raw({ type: ['application/pdf', 'appli
     res.json(await uploadRequestQuotationPdf(req.params.id, req.body, {
       filename: req.get('X-File-Name'),
       quote_value: req.get('X-Quote-Value'),
+      quotation_number: req.get('X-Quotation-Number'),
     }, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to upload estimation quotation PDF', error);

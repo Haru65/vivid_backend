@@ -135,12 +135,17 @@ test('quotation revisions update the existing quotation and preserve its number'
   assert.doesNotMatch(revisionFlow, /quotationNumber.*-R/);
 });
 
-test('uploaded PDFs receive quotation numbers instead of using their filenames', () => {
+test('uploaded PDFs require Estimation quotation numbers instead of automatic numbers or filenames', () => {
   const serviceSource = fs.readFileSync(path.join(__dirname, '../services/estimationService.js'), 'utf8');
+  const uploadFlow = serviceSource.slice(
+    serviceSource.indexOf('async function uploadRequestQuotationPdf'),
+    serviceSource.indexOf('async function getUploadedRequestQuotationPdf'),
+  );
 
-  assert.match(serviceSource, /REGEXP_REPLACE\(COALESCE\(q\.quotation_number, equ\.quotation_number\).+AS quotation_number/);
-  assert.match(serviceSource, /nextval\('quotation_number_seq'\)/);
-  assert.match(serviceSource, /estimation_request_id, quotation_number, revision_number, filename/);
+  assert.match(serviceSource, /COALESCE\(REGEXP_REPLACE\(q\.quotation_number.+equ\.quotation_number\) AS quotation_number/);
+  assert.match(uploadFlow, /uploadedQuotationNumber\(metadata\.quotation_number\)/);
+  assert.doesNotMatch(uploadFlow, /nextUploadedQuotationNumber/);
+  assert.match(uploadFlow, /estimation_request_id, quotation_number, revision_number, filename/);
   assert.match(serviceSource, /\[uploaded\.quotation_number, request\.lead_id\]/);
   assert.doesNotMatch(serviceSource, /\[uploaded\.filename, request\.lead_id\]/);
   assert.doesNotMatch(serviceSource, /request\.uploaded_quote_filename/);

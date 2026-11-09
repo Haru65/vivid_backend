@@ -103,7 +103,7 @@ const SELECT_REQUEST = `
   (SELECT c.region FROM customers c WHERE c.id = l.customer_id) AS region,
   l.enquiry_state,
   l.sales_approval_status,
-  REGEXP_REPLACE(COALESCE(q.quotation_number, equ.quotation_number), '-R[0-9]+$', '', 'i') AS quotation_number,
+  COALESCE(REGEXP_REPLACE(q.quotation_number, '-R[0-9]+$', '', 'i'), equ.quotation_number) AS quotation_number,
   q.status AS quotation_status,
   COALESCE(q.total_amount, equ.quote_value) AS quotation_total,
   q.technical_notes_data,
@@ -218,6 +218,54 @@ async function listEstimationRequests(user) {
     result = await pool.query(requestQuery('WHERE er.requested_by_name = $1 OR er.sales_owner_name = $1 OR er.sales_owner_id = $2'), [actorName(user), user?.id || null]);
   }
   return result.rows.map((request) => scopeRequestForPoAccess(request, user));
+}
+
+async function reorderTeamPriorities(data, user) {
+  const team = String(data?.team || '').trim().toLowerCase();
+  if (!['estimation', 'sales'].includes(team)) throw appError('Priority team must be estimation or sales.');
+  const allowed = team === 'estimation'
+    ? ['admin', 'estimation_head'].includes(user?.role)
+    : team === 'sales' && ['admin', 'sales_head'].includes(user?.role);
+  if (!allowed) throw appError(`Only the ${team === 'sales' ? 'Sales Head' : 'Estimation Head'} can prioritize these enquiries.`, 403);
+  const engineerId = Number(data?.engineer_id);
+  const requestIds = Array.isArray(data?.request_ids) ? data.request_ids.map(Number) : [];
+  if (!Number.isSafeInteger(engineerId) || engineerId <= 0) throw appError('Choose a valid engineer.');
+  if (!requestIds.length || requestIds.some((id) => !Number.isSafeInteger(id) || id <= 0) || new Set(requestIds).size !== requestIds.length) {
+    throw appError('Provide a valid enquiry priority order.');
+  }
+  const engineerResult = await pool.query(
+    `SELECT id, first_name, last_name, role FROM users WHERE id = $1 AND is_active = TRUE`,
+    [engineerId],
+  );
+  const engineer = engineerResult.rows[0];
+  const validRoles = team === 'estimation' ? ['estimation_engineer', 'presales'] : ['sales_engineer', 'salesperson', 'presales'];
+  if (!engineer || !validRoles.includes(engineer.role)) throw appError('The selected engineer is not available for this team.');
+  const engineerName = [engineer.first_name, engineer.last_name].filter(Boolean).join(' ').trim().toLowerCase();
+  const requests = await pool.query(
+    `SELECT id, assigned_engineer_id, assigned_engineer_name, sales_owner_id, sales_owner_name, requested_by_user_id, requested_by_name
+     FROM estimation_requests
+     WHERE id = ANY($1::int[])`,
+    [requestIds],
+  );
+  const belongsToEngineer = (request) => team === 'estimation'
+    ? (String(request.assigned_engineer_id || '') === String(engineerId)
+      || (!request.assigned_engineer_id && String(request.assigned_engineer_name || '').trim().toLowerCase() === engineerName))
+    : (String(request.sales_owner_id || '') === String(engineerId)
+      || String(request.requested_by_user_id || '') === String(engineerId)
+      || [request.sales_owner_name, request.requested_by_name].some((name) => String(name || '').trim().toLowerCase() === engineerName));
+  if (requests.rows.length !== requestIds.length || requests.rows.some((request) => !belongsToEngineer(request))) {
+    throw appError('Every enquiry must belong to the selected engineer.', 409);
+  }
+  const column = team === 'estimation' ? 'estimation_priority_order' : 'sales_priority_order';
+  const result = await pool.query(
+    `UPDATE estimation_requests AS request
+     SET ${column} = priority.position::integer
+     FROM UNNEST($1::int[]) WITH ORDINALITY AS priority(id, position)
+     WHERE request.id = priority.id
+     RETURNING request.id, request.${column}`,
+    [requestIds],
+  );
+  return { team, engineer_id: engineerId, priorities: result.rows };
 }
 
 async function updateEnquiryState(id, data, user) {
@@ -429,6 +477,16 @@ function uploadedQuoteValue(value) {
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
+function uploadedQuotationNumber(value) {
+  let decoded = String(value || '');
+  try { decoded = decodeURIComponent(decoded); } catch {}
+  const quotationNumber = decoded.trim();
+  if (!quotationNumber) throw appError('Enter the quotation number provided by Estimation.');
+  if (quotationNumber.length > 80) throw appError('Quotation number must be 80 characters or fewer.');
+  if (/[\r\n\0]/.test(quotationNumber)) throw appError('Quotation number contains invalid characters.');
+  return quotationNumber;
+}
+
 function quotationNumberFormat(settings = {}) {
   const numbering = settings.quotation_numbering || {};
   return {
@@ -512,13 +570,12 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   if (pdf.subarray(0, 5).toString('ascii') !== '%PDF-') throw appError('The selected file is not a valid PDF.');
   const filename = uploadedPdfFilename(metadata.filename);
   const quoteValue = uploadedQuoteValue(metadata.quote_value);
+  const enteredQuotationNumber = uploadedQuotationNumber(metadata.quotation_number);
   const isRevision = ['revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status);
-  const isSalesRevision = request.status === 'revision_requested_by_sales';
   const nextStatus = isEngineer
     ? (isRevision ? 'revision_submitted_for_review' : 'submitted_for_review')
     : (isRevision ? 'revision_in_progress' : 'in_progress');
-  const numberFormat = quotationNumberFormat(await getMasterSettings());
-  let uploadedQuotationNumber = request.uploaded_quotation_number || null;
+  const savedQuotationNumber = enteredQuotationNumber;
 
   const client = await pool.connect();
   try {
@@ -530,13 +587,10 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
        FOR UPDATE`,
       [id],
     );
-    let quotationNumber = existingUpload.rows[0]?.quotation_number
-      || await nextUploadedQuotationNumber(client, numberFormat);
     let revisionNumber = Number(existingUpload.rows[0]?.revision_number || 0);
-    if (isSalesRevision) {
+    if (['revision_requested', 'revision_requested_by_sales'].includes(request.status)) {
       revisionNumber += 1;
     }
-    uploadedQuotationNumber = quotationNumber;
     await client.query(
       `INSERT INTO estimation_quote_uploads (
          estimation_request_id, quotation_number, revision_number, filename, mime_type, file_size, quote_value, pdf_data,
@@ -554,7 +608,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
            uploaded_by_name = EXCLUDED.uploaded_by_name,
            uploaded_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP`,
-      [id, quotationNumber, revisionNumber, filename, pdf.length, quoteValue, pdf, user?.id || null, actorName(user)],
+      [id, enteredQuotationNumber, revisionNumber, filename, pdf.length, quoteValue, pdf, user?.id || null, actorName(user)],
     );
     await client.query(
       `UPDATE estimation_requests
@@ -574,6 +628,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23505') throw appError('This quotation number already exists. Enter the number shown on this Estimation quotation.', 409);
     throw error;
   } finally {
     client.release();
@@ -581,12 +636,12 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
 
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `${actorName(user)} uploaded quotation ${uploadedQuotationNumber} with value ${quoteValue.toFixed(2)}${isEngineer ? ' for Estimation Head review' : ''}`,
+    content: `${actorName(user)} uploaded quotation ${savedQuotationNumber} with value ${quoteValue.toFixed(2)}${isEngineer ? ' for Estimation Head review' : ''}`,
   }, user);
   if (isEngineer) {
     const notification = {
       title: 'Quotation PDF ready for review',
-      body: `${actorName(user)} uploaded quotation ${uploadedQuotationNumber} for ${request.company_name || `lead #${request.lead_id}`}.`,
+      body: `${actorName(user)} uploaded quotation ${savedQuotationNumber} for ${request.company_name || `lead #${request.lead_id}`}.`,
       category: 'estimation',
       link_type: 'estimation_request',
       link_id: request.id,
@@ -1666,6 +1721,7 @@ module.exports = {
   listEstimationRequests,
   markQuotationSent,
   requestRevision,
+  reorderTeamPriorities,
   sendUploadedRequestQuotation,
   submitForReview,
   submitLeadToEstimation,

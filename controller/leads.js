@@ -97,6 +97,36 @@ function validationError(message) {
   return error;
 }
 
+function conflictError(message) {
+  const error = new Error(message);
+  error.statusCode = 409;
+  return error;
+}
+
+function normalizeProjectName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+async function ensureUniqueProjectName(db, projectName, excludedLeadId = null) {
+  const normalized = normalizeProjectName(projectName);
+  if (!normalized) return;
+
+  // Serialize checks for the same normalized name so two concurrent requests
+  // cannot both pass the lookup before either transaction inserts its lead.
+  await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [normalized]);
+  const duplicate = await db.query(
+    `SELECT id
+     FROM leads
+     WHERE LOWER(REGEXP_REPLACE(BTRIM(project_name), '\\s+', ' ', 'g')) = $1
+       AND ($2::bigint IS NULL OR id <> $2::bigint)
+     LIMIT 1`,
+    [normalized, excludedLeadId],
+  );
+  if (duplicate.rows.length) {
+    throw conflictError('Project name already exists. Enter a unique project name.');
+  }
+}
+
 function activityColumns(alias = 'a') {
   return `${alias}.id, ${alias}.lead_id, ${alias}.activity_type, ${alias}.content, ${alias}.actor_user_id, ${alias}.actor_name, ${alias}.metadata, ${alias}.created_at`;
 }
@@ -869,6 +899,7 @@ async function createLead(leadData, user) {
     await ensureLeadSourceAllowed(ownedLeadData.lead_source);
     await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
     const values = leadValues(ownedLeadData);
+    await ensureUniqueProjectName(client, values[21]);
     if (QUOTATION_REQUIRED_STATUSES.has(values[14])) {
       throw validationError(`Create the lead and send a quotation before moving it to ${values[14]}.`);
     }
@@ -984,6 +1015,7 @@ async function updateLead(id, leadData, user, options = {}) {
     await ensureLeadSourceAllowed(ownedLeadData.lead_source, previous.lead_source);
     await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
     const values = leadValues(ownedLeadData);
+    await ensureUniqueProjectName(client, values[21], id);
     await ensureLeadStatusAllowed({
       ...previous,
       quotation: values[12] || previous.quotation,
