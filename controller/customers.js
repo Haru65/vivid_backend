@@ -163,10 +163,10 @@ async function resolveAccountOwner(data, user, db, previous = null) {
     `SELECT id, first_name, last_name
      FROM users
      WHERE id = $1 AND is_active = TRUE
-       AND role IN ('salesperson', 'sales_engineer', 'presales')`,
+       AND role IN ('salesperson', 'sales_engineer', 'presales', 'sales_head')`,
     [ownerId],
   );
-  if (!result.rows[0]) throw validationError('Select an active sales account owner.');
+  if (!result.rows[0]) throw validationError('Select an active salesperson, sales engineer, presales user, or Sales Head.');
   return { id: Number(result.rows[0].id), name: [result.rows[0].first_name, result.rows[0].last_name].filter(Boolean).join(' ') };
 }
 
