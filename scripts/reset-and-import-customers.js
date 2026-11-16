@@ -280,6 +280,26 @@ const INSERT_CUSTOMER_SQL = `
   )
 `;
 
+const UPDATE_CUSTOMER_SQL = `
+  UPDATE customers
+  SET company_name = $1,
+      company_type = $2,
+      contact_person_name = $3,
+      contact_person_email = $4,
+      contact_person_phone = $5,
+      billing_address = $6,
+      country = COALESCE($7, 'India'),
+      state = $8,
+      city = $9,
+      region = $10,
+      account_owner_user_id = $11,
+      account_owner_name = $12,
+      remarks = $13,
+      raw_data = $14::jsonb,
+      updated_at = CURRENT_TIMESTAMP
+  WHERE id = $15
+`;
+
 async function insertCustomers(db, rows) {
   for (const { rowNumber, customer } of rows) {
     try {
@@ -303,6 +323,32 @@ async function insertCustomers(db, rows) {
       error.message = `Excel row ${rowNumber} (${customer.company_name || 'unnamed customer'}): ${error.message}`;
       throw error;
     }
+  }
+}
+
+async function updateCustomer(db, row, customerId) {
+  const { rowNumber, customer } = row;
+  try {
+    await db.query(UPDATE_CUSTOMER_SQL, [
+      customer.company_name,
+      customer.company_type,
+      customer.contact_person_name,
+      customer.contact_person_email,
+      customer.contact_person_phone,
+      customer.billing_address,
+      customer.country,
+      customer.state,
+      customer.city,
+      customer.region,
+      customer.account_owner_user_id,
+      customer.account_owner_name,
+      customer.remarks,
+      JSON.stringify(customer.raw_data),
+      customerId,
+    ]);
+  } catch (error) {
+    error.message = `Excel row ${rowNumber} (${customer.company_name || 'unnamed customer'}): ${error.message}`;
+    throw error;
   }
 }
 
@@ -390,6 +436,7 @@ module.exports = {
   insertCustomers,
   listUsers,
   mapUsersByName,
+  normalizedName,
   normalizePhone,
   parseArguments,
   readCustomers,
@@ -397,4 +444,5 @@ module.exports = {
   resolveAccountOwner,
   validateRows,
   workbookRows,
+  updateCustomer,
 };
