@@ -86,6 +86,23 @@ test('presales is a supported hybrid sales and estimation role', () => {
   assert.match(quotationSource, /SALES_ROLES[^\n]*'presales'/);
 });
 
+test('Estimation Manager has all-enquiry visibility and allotment without Head approval', () => {
+  const estimationSource = fs.readFileSync(path.join(__dirname, '../services/estimationService.js'), 'utf8');
+  const leadRouteSource = fs.readFileSync(path.join(__dirname, '../routes/lead_dashboard.js'), 'utf8');
+  const managerWidgets = normalizeMasterSettings({}).dashboard_widgets.estimation_manager;
+
+  assert.equal(USER_ROLES.has('estimation_manager'), true);
+  assert.deepEqual(managerWidgets, ['engineer_performance']);
+  assert.match(estimationSource, /\['admin', 'estimation_head', 'estimation_manager', 'sales_head', 'presales'\]\.includes\(user\?\.role\)/);
+  assert.match(estimationSource, /requireEstimationAllocator\(user\)/);
+  assert.match(estimationSource, /\['admin', 'estimation_head', 'estimation_manager'\]\.includes\(user\?\.role\)/);
+  assert.match(estimationSource, /function isEstimationHead\(user\) \{\s+return \['admin', 'estimation_head'\]\.includes\(user\?\.role\);\s+\}/);
+  assert.match(leadRouteSource, /router\.use\(requireRoles\(\.\.\.SALES_ROLES, 'estimation_manager'\)\)/);
+  assert.match(leadRouteSource, /router\.post\('\/create-lead', requireSalesRole/);
+  assert.match(leadRouteSource, /router\.put\('\/update-lead\/:id', requireSalesRole/);
+  assert.match(leadRouteSource, /router\.delete\('\/delete-lead\/:id', requireSalesRole/);
+});
+
 test('production authentication requires an explicit JWT secret', () => {
   const previousEnvironment = process.env.NODE_ENV;
   const previousSecret = process.env.JWT_SECRET;

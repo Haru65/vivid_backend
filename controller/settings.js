@@ -20,7 +20,7 @@ const DEAL_PRODUCTS = [
   'PDU',
 ];
 
-const DASHBOARD_ROLES = ['admin', 'sales_head', 'salesperson', 'sales_engineer', 'presales', 'estimation_head', 'estimation_engineer', 'erp'];
+const DASHBOARD_ROLES = ['admin', 'sales_head', 'salesperson', 'sales_engineer', 'presales', 'estimation_head', 'estimation_manager', 'estimation_engineer', 'erp'];
 const DASHBOARD_WIDGETS = ['executive_metrics', 'sales_funnel', 'monthly_trend', 'project_health', 'engineer_performance', 'lead_reminders', 'pipeline_health'];
 const DEFAULT_DASHBOARD_WIDGETS = {
   admin: ['executive_metrics', 'sales_funnel', 'monthly_trend', 'lead_reminders', 'project_health', 'engineer_performance'],
@@ -29,6 +29,7 @@ const DEFAULT_DASHBOARD_WIDGETS = {
   sales_engineer: ['executive_metrics', 'lead_reminders', 'pipeline_health'],
   presales: ['executive_metrics', 'lead_reminders', 'pipeline_health', 'engineer_performance'],
   estimation_head: ['engineer_performance'],
+  estimation_manager: ['engineer_performance'],
   estimation_engineer: ['engineer_performance'],
   erp: ['executive_metrics', 'project_health'],
 };

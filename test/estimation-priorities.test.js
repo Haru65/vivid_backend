@@ -55,6 +55,19 @@ test('Sales Head cannot change estimation engineer priorities', async () => {
   assert.equal(calls.length, 0);
 });
 
+test('Estimation Manager cannot change team priorities', async () => {
+  const { service, calls } = loadService({ engineer: null, requests: [] });
+
+  await assert.rejects(
+    service.reorderTeamPriorities(
+      { team: 'estimation', engineer_id: 8, request_ids: [22] },
+      { id: 4, role: 'estimation_manager' },
+    ),
+    (error) => error.statusCode === 403 && /Estimation Head/.test(error.message),
+  );
+  assert.equal(calls.length, 0);
+});
+
 test('Sales Head can persist a sales engineer enquiry order', async () => {
   const { service, calls } = loadService({
     engineer: { id: 14, first_name: 'Sales', last_name: 'Engineer', role: 'sales_engineer' },

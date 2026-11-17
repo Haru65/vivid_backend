@@ -3,7 +3,7 @@ const { requireRoles } = require('../middleware/auth');
 const { listLeadChanges, reviewLeadChange, requestLeadChangeMdApproval } = require('../services/leadChangeService');
 
 const router = express.Router();
-router.use(requireRoles('admin', 'sales_head', 'estimation_head', 'sales_engineer', 'estimation_engineer', 'presales'));
+router.use(requireRoles('admin', 'sales_head', 'estimation_head', 'estimation_manager', 'sales_engineer', 'estimation_engineer', 'presales'));
 
 function handleError(res, error) {
   console.error('Lead change request failed:', error);

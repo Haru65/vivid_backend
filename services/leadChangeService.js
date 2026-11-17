@@ -95,7 +95,7 @@ async function submitLeadChange(db, previous, proposed, user, reviewers = {}) {
 }
 
 async function listLeadChanges(user, db = pool) {
-  const roles = ['admin', 'sales_head', 'estimation_head', 'sales_engineer', 'estimation_engineer', 'presales'];
+  const roles = ['admin', 'sales_head', 'estimation_head', 'estimation_manager', 'sales_engineer', 'estimation_engineer', 'presales'];
   if (!roles.includes(user.role)) throw appError('You do not have access to lead change requests.', 403);
   const result = await db.query(
     `SELECT r.*, s.first_name || ' ' || s.last_name AS sales_head_name,
@@ -110,7 +110,7 @@ async function listLeadChanges(user, db = pool) {
        OR ($1 = 'estimation_head' AND r.status = 'applied' AND EXISTS (
          SELECT 1 FROM estimation_requests er WHERE er.lead_id = r.lead_id AND er.estimation_head_id = $2
        ))
-       OR ($1 IN ('estimation_engineer', 'presales') AND r.status = 'applied' AND EXISTS (
+       OR ($1 IN ('estimation_manager', 'estimation_engineer', 'presales') AND r.status = 'applied' AND EXISTS (
          SELECT 1 FROM estimation_requests er WHERE er.lead_id = r.lead_id AND er.assigned_engineer_id = $2
        ))
      ORDER BY (r.status IN ('pending', 'pending_md_approval')) DESC, r.created_at DESC, r.id DESC`,

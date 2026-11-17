@@ -40,6 +40,6 @@ test('Estimation Head team dashboard is restricted to the selected engineer', as
 
   assert.equal(db.calls.some((call) => /activity_type IN \('approval_requested', 'approval'\)/.test(call.sql)), false);
   assert.match(db.calls[0].sql, /a\.actor_user_id = \$1/);
-  assert.match(db.calls[0].sql, /u\.role IN \('salesperson', 'sales_engineer', 'presales', 'estimation_engineer'\)/);
+  assert.match(db.calls[0].sql, /u\.role IN \('salesperson', 'sales_engineer', 'presales', 'estimation_manager', 'estimation_engineer'\)/);
   assert.equal(db.calls.every((call) => call.values.includes(14)), true);
 });

@@ -46,7 +46,7 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
   if (approvalOnly) conditions.push(`a.activity_type IN ('approval_requested', 'approval')`);
   if (teamDashboard) {
     conditions.push(`a.actor_user_id = ${addValue(actorId)}`);
-    conditions.push(`u.role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_engineer')`);
+    conditions.push(`u.role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_manager', 'estimation_engineer')`);
   }
 
   const search = String(query.q || '').trim().slice(0, 200);
@@ -109,7 +109,7 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
   const metadataWhere = approvalOnly
     ? " WHERE activity_type IN ('approval_requested', 'approval')"
     : teamDashboard
-      ? " WHERE actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_engineer'))"
+      ? " WHERE actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_manager', 'estimation_engineer'))"
       : '';
   const metadataValues = teamDashboard ? [actorId] : [];
   const [typesResult, actorsResult] = await Promise.all([
@@ -119,7 +119,7 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
       FROM lead_activities
       WHERE NULLIF(TRIM(actor_name), '') IS NOT NULL
         ${approvalOnly ? "AND activity_type IN ('approval_requested', 'approval')" : ''}
-        ${teamDashboard ? "AND actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_engineer'))" : ''}
+        ${teamDashboard ? "AND actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_manager', 'estimation_engineer'))" : ''}
       GROUP BY actor_name
       ORDER BY actor_name ASC
     `, metadataValues),
