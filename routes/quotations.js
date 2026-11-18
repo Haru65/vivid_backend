@@ -116,7 +116,7 @@ router.post('/send-quotation/:id', async (req, res) => {
   try {
     res.json(await sendQuotation(req.params.id, currentUser(req)));
   } catch (error) {
-    handleError(res, 'Unable to send quotation', error);
+    handleError(res, 'Unable to mark quotation email as sent', error);
   }
 });
 

@@ -1,6 +1,5 @@
 const pool = require('../config/db_connection');
 const { logLeadActivity } = require('./leads');
-const { sendEmail } = require('../services/emailService');
 const { generateQuotationPdf } = require('../services/quotationGeneration');
 const { getMasterSettings } = require('./settings');
 
@@ -617,15 +616,6 @@ async function deleteQuotation(id, user) {
   }
 }
 
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 async function sendQuotation(id, user) {
   const client = await pool.connect();
   let quotationId;
@@ -636,16 +626,7 @@ async function sendQuotation(id, user) {
     if (quotation.estimation_request_id && quotation.estimation_status !== 'returned_to_sales') {
       throw appError('Estimation must complete and return this quotation to sales before it can be sent.', 409);
     }
-    const recipient = quotation.contact_person_email || quotation.billing_email;
-    if (!recipient) throw appError('Add a customer email address before sending this quotation.');
-
-    const pdf = await generateQuotationPdf(quotation, user);
-    await sendEmail({
-      to: recipient,
-      subject: `Quotation ${quotation.quotation_number} - Vivid Electromech`,
-      html: `<p>Dear ${escapeHtml(quotation.contact_person_name || 'Customer')},</p><p>Please find attached quotation <strong>${escapeHtml(quotation.quotation_number)}</strong> for ${escapeHtml(quotation.company_name)}.</p><p>Regards,<br>${escapeHtml(actorName(user) || 'Vivid Electromech')}</p>`,
-      attachments: [{ filename: `${quotation.quotation_number}.pdf`, content: pdf }],
-    });
+    const recipient = quotation.contact_person_email || quotation.billing_email || null;
 
     const updated = await client.query(
       `UPDATE quotations
@@ -681,8 +662,13 @@ async function sendQuotation(id, user) {
     );
     await logLeadActivity(quotation.lead_id, {
       activity_type: 'email',
-      content: `Quotation ${quotation.quotation_number} emailed to ${recipient}`,
-      metadata: { quotation_id: quotation.id, recipient },
+      content: `Quotation ${quotation.quotation_number} marked as manually emailed to the client`,
+      metadata: {
+        quotation_id: quotation.id,
+        recipient,
+        delivery_method: 'manual_email',
+        marked_sent: true,
+      },
     }, user, client);
     await client.query('COMMIT');
   } catch (error) {

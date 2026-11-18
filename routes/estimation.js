@@ -190,7 +190,7 @@ router.post('/:id/send-uploaded-quotation', async (req, res) => {
   try {
     res.json(await sendUploadedRequestQuotation(req.params.id, currentUser(req)));
   } catch (error) {
-    handleError(res, 'Unable to send uploaded quotation', error);
+    handleError(res, 'Unable to mark uploaded quotation email as sent', error);
   }
 });
 

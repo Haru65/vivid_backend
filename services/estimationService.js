@@ -4,7 +4,6 @@ const { createQuotation, createQuotationRevision, updateQuotation } = require('.
 const { logLeadActivity } = require('../controller/leads');
 const { createNotification, notifyRole, notifyUserId } = require('./notificationService');
 const { getMasterSettings } = require('../controller/settings');
-const { sendEmail } = require('./emailService');
 const {
   PDFDocument,
   StandardFonts,
@@ -676,15 +675,6 @@ async function getUploadedRequestQuotationPdf(id, user) {
   return result.rows[0];
 }
 
-function escapeEmailHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 async function sendUploadedRequestQuotation(id, user) {
   requireSales(user);
   const request = await getRequest(id, user);
@@ -692,15 +682,6 @@ async function sendUploadedRequestQuotation(id, user) {
     throw appError('Estimation must approve and return this quotation before it can be sent.', 409);
   }
   const uploaded = await getUploadedRequestQuotationPdf(id, user);
-  const recipient = request.contact_person_email;
-  if (!recipient) throw appError('Add a customer email address before sending this quotation.');
-
-  await sendEmail({
-    to: recipient,
-    subject: `Quotation ${uploaded.quotation_number} - ${request.company_name || request.project_name || 'Vivid Electromech'}`,
-    html: `<p>Dear ${escapeEmailHtml(request.contact_person_name || 'Customer')},</p><p>Please find attached our quotation for ${escapeEmailHtml(request.project_name || request.company_name || 'your enquiry')}.</p><p>Regards,<br>${escapeEmailHtml(actorName(user) || 'Vivid Electromech')}</p>`,
-    attachments: [{ filename: uploaded.filename, content: uploaded.pdf_data }],
-  });
   await pool.query(
     `UPDATE estimation_requests
      SET status = 'sent_to_client', sent_to_client_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -716,8 +697,14 @@ async function sendUploadedRequestQuotation(id, user) {
     [uploaded.quotation_number, request.lead_id],
   );
   await logLeadActivity(request.lead_id, {
-    activity_type: 'system',
-    content: `Quotation ${uploaded.quotation_number} emailed to ${recipient}`,
+    activity_type: 'email',
+    content: `Quotation ${uploaded.quotation_number} marked as manually emailed to the client`,
+    metadata: {
+      estimation_request_id: request.id,
+      recipient: request.contact_person_email || null,
+      delivery_method: 'manual_email',
+      marked_sent: true,
+    },
   }, user);
   return getRequest(id, user);
 }
