@@ -1,6 +1,6 @@
 const pool = require('../config/db_connection');
 const { getMasterSettings } = require('./settings');
-const { notifyUserId } = require('../services/notificationService');
+const { notifyLeadClassificationChange, notifyUserId } = require('../services/notificationService');
 
 const LEAD_COLUMNS = `
   id,
@@ -977,12 +977,27 @@ async function createLead(leadData, user) {
   return (await retrieveLead(lead.id)) || lead;
 }
 
+async function leadChangesRequireApproval(db, leadId, user, options = {}) {
+  if (roleOf(user) !== 'sales_engineer' || options.approvedChangeId) return false;
+  const result = await db.query(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM estimation_requests
+       WHERE lead_id = $1
+         AND status NOT IN ('cancelled', 'discarded', 'dropped')
+     ) AS required`,
+    [leadId],
+  );
+  return Boolean(result.rows[0]?.required);
+}
+
 async function updateLead(id, leadData, user, options = {}) {
   const ownTransaction = !options.db;
   const client = options.db || await pool.connect();
   let previous;
   let lead;
   let owner;
+  let approvalRequest = null;
   try {
     if (ownTransaction) await client.query('BEGIN');
     const previousResult = await client.query(
@@ -1014,19 +1029,27 @@ async function updateLead(id, leadData, user, options = {}) {
       : leadDataForCustomer({ ...leadData, assigned_to: owner.name }, customer);
     await ensureLeadSourceAllowed(ownedLeadData.lead_source, previous.lead_source);
     await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
-    const values = leadValues(ownedLeadData);
+    let values = leadValues(ownedLeadData);
     await ensureUniqueProjectName(client, values[21], id);
     await ensureLeadStatusAllowed({
       ...previous,
       quotation: values[12] || previous.quotation,
     }, values[14]);
-    if (roleOf(user) === 'sales_engineer' && !options.approvedChangeId) {
-      const { LEAD_EDIT_FIELDS, submitLeadChange } = require('../services/leadChangeService');
+    const protectedFieldsChanged = String(previous.enquiry_product || '') !== String(values[9] || '')
+      || String(previous.sales_approval_status || '') !== String(values[19] || '');
+    if (protectedFieldsChanged && await leadChangesRequireApproval(client, id, user, options)) {
+      const { LEAD_EDIT_FIELDS, leadSnapshot, submitLeadChange } = require('../services/leadChangeService');
       const normalized = Object.fromEntries(LEAD_EDIT_FIELDS.slice(0, 27).map((field, index) => [field, values[index]]));
       const proposed = { ...normalized, customer_id: customer.id, sales_owner_id: owner.id };
-      const request = await submitLeadChange(client, previous, proposed, user, leadData.change_reviewers);
-      if (ownTransaction) await client.query('COMMIT');
-      return request;
+      const approvalOnlyProposal = {
+        ...leadSnapshot(previous),
+        enquiry_product: proposed.enquiry_product,
+        sales_approval_status: proposed.sales_approval_status,
+      };
+      approvalRequest = await submitLeadChange(client, previous, approvalOnlyProposal, user, leadData.change_reviewers);
+      values = [...values];
+      values[9] = previous.enquiry_product;
+      values[19] = previous.sales_approval_status;
     }
     const updateValues = [...values.slice(0, 6), customer.id, ...values.slice(6, 17), owner.id, owner.id, ...values.slice(17), id];
 
@@ -1107,6 +1130,17 @@ async function updateLead(id, leadData, user, options = {}) {
     else await logLeadActivity(lead.id, activity, user, activityDb);
   }
 
+  if (changed(previous, lead, 'enquiry_state')) {
+    await notifyLeadClassificationChange({
+      leadId: lead.id,
+      companyName: lead.company_name,
+      projectName: lead.project_name,
+      previousClassification: previous.enquiry_state,
+      nextClassification: lead.enquiry_state,
+      changedBy: user,
+    }, activityDb);
+  }
+
   if ((changed(previous, lead, 'assigned_to') || String(previous.sales_owner_id || '') !== String(owner.id))
     && String(owner.id) !== String(user?.id || '')) {
     await notifyUserId(owner.id, {
@@ -1118,7 +1152,8 @@ async function updateLead(id, leadData, user, options = {}) {
     }, activityDb);
   }
 
-  return options.db ? lead : (await retrieveLead(lead.id)) || lead;
+  const savedLead = options.db ? lead : (await retrieveLead(lead.id)) || lead;
+  return approvalRequest ? { ...approvalRequest, lead: savedLead } : savedLead;
 }
 
 async function setLeadWorkflowState(id, data, user) {
@@ -1293,6 +1328,7 @@ module.exports = {
   cancelLeadFollowup,
   logLeadActivity,
   createLead,
+  leadChangesRequireApproval,
   updateLead,
   setLeadWorkflowState,
   deleteLead,

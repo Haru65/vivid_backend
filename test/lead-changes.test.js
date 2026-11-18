@@ -1,11 +1,32 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { leadSnapshot, changesBetween, submitLeadChange, reviewLeadChange, listLeadChanges } = require('../services/leadChangeService');
+const { leadChangesRequireApproval } = require('../controller/leads');
 
 const salesHead = { id: 2, name: 'Sales Head', role: 'sales_head' };
 const estimationHead = { id: 3, name: 'Estimation Head', role: 'estimation_head' };
 const engineer = { id: 1, name: 'Sales Engineer', role: 'sales_engineer' };
 const baseLead = { id: 7, company_name: 'Acme', project_name: 'Original project', sales_owner_id: 1, assigned_to: engineer.name, customer_id: 10, enquiry_date: '2026-10-26', lead_status: 'New', priority: 'Medium' };
+
+test('Sales Engineer changes require approval only after submission to Estimation', async () => {
+  let activeEstimation = false;
+  let queryCount = 0;
+  const db = {
+    async query(sql, values) {
+      queryCount += 1;
+      assert.match(sql, /FROM estimation_requests/);
+      assert.deepEqual(values, [7]);
+      return { rows: [{ required: activeEstimation }] };
+    },
+  };
+
+  assert.equal(await leadChangesRequireApproval(db, 7, engineer), false);
+  activeEstimation = true;
+  assert.equal(await leadChangesRequireApproval(db, 7, engineer), true);
+  assert.equal(await leadChangesRequireApproval(db, 7, salesHead), false);
+  assert.equal(await leadChangesRequireApproval(db, 7, engineer, { approvedChangeId: 9 }), false);
+  assert.equal(queryCount, 2);
+});
 
 function database() {
   const before = leadSnapshot(baseLead);

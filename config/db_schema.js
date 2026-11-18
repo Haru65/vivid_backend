@@ -1295,6 +1295,9 @@ async function createLeadChangeRequestSchema(db = pool) {
       md_decided_at TIMESTAMPTZ,
       md_comments TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      due_at TIMESTAMPTZ NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '3 days'),
+      reminder_sent_at TIMESTAMPTZ,
+      auto_approved_at TIMESTAMPTZ,
       resolved_at TIMESTAMPTZ,
       CHECK (sales_head_id <> estimation_head_id),
       CHECK (requested_by_user_id <> sales_head_id AND requested_by_user_id <> estimation_head_id)
@@ -1315,10 +1318,17 @@ async function createLeadChangeRequestSchema(db = pool) {
       ADD COLUMN IF NOT EXISTS md_decided_by_user_id BIGINT,
       ADD COLUMN IF NOT EXISTS md_decided_by_name VARCHAR(255),
       ADD COLUMN IF NOT EXISTS md_decided_at TIMESTAMPTZ,
-      ADD COLUMN IF NOT EXISTS md_comments TEXT;
+      ADD COLUMN IF NOT EXISTS md_comments TEXT,
+      ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP + INTERVAL '3 days'),
+      ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS auto_approved_at TIMESTAMPTZ;
+    UPDATE lead_change_requests SET due_at = created_at + INTERVAL '3 days' WHERE due_at IS NULL;
+    ALTER TABLE lead_change_requests ALTER COLUMN due_at SET NOT NULL;
     DROP INDEX IF EXISTS lead_change_requests_pending_lead_idx;
     CREATE UNIQUE INDEX lead_change_requests_pending_lead_idx
       ON lead_change_requests (lead_id) WHERE status IN ('pending', 'pending_md_approval');
+    CREATE INDEX IF NOT EXISTS lead_change_requests_deadline_idx
+      ON lead_change_requests (status, due_at) WHERE status = 'pending';
   `);
 }
 

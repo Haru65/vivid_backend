@@ -77,19 +77,19 @@ async function submitLeadChange(db, previous, proposed, user, reviewers = {}) {
   const estimationHeadId = await chooseReviewer(db, 'estimation_head', reviewers.estimation_head_id, estimation.rows[0]?.estimation_head_id, user.id);
   const result = await db.query(
     `INSERT INTO lead_change_requests
-       (lead_id, company_name, requested_by_user_id, requested_by_name, estimation_head_id, before_snapshot, proposed_snapshot, changes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+       (lead_id, company_name, requested_by_user_id, requested_by_name, estimation_head_id, before_snapshot, proposed_snapshot, changes, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP + INTERVAL '3 days') RETURNING *`,
     [previous.id, previous.company_name, user.id, user.name, estimationHeadId,
       JSON.stringify(before), JSON.stringify(after), JSON.stringify(changes)],
   );
   const request = result.rows[0];
   await writeActivity(db, previous.id, user, 'approval_requested',
-    `Lead change #${request.id} requested; awaiting Estimation Head approval.`,
-    { event: 'lead_change_requested', request_id: request.id, changes });
+    `Selected make/product change #${request.id} requested; Estimation Head approval is due within 3 days.`,
+    { event: 'lead_change_requested', request_id: request.id, changes, due_at: request.due_at });
   await notifyUserId(estimationHeadId, {
     title: 'Lead change approval required',
-    body: `${user.name} proposed changes to ${previous.company_name}. Your approval is required.`,
-    category: 'lead_change', link_type: 'lead_change_request', link_id: request.id,
+    body: `${user.name} proposed selected make/product changes to ${previous.company_name}. Review within 3 days; otherwise the request will be approved automatically.`,
+    category: 'lead_change', link_type: 'lead_change_request', link_id: request.id, metadata: { due_at: request.due_at },
   }, db);
   return { approval_required: true, change_request: request };
 }
@@ -166,7 +166,10 @@ async function reviewLeadChange(id, decision, comments, user, dependencies = {})
     if (next.estimation_approved_at || next.md_decided_at) {
       const leadResult = await client.query('SELECT * FROM leads WHERE id = $1 FOR UPDATE', [request.lead_id]);
       const lead = leadResult.rows[0];
-      const stale = !lead || Object.keys(changesBetween(request.before_snapshot, leadSnapshot(lead))).length > 0;
+      const currentSnapshot = lead ? leadSnapshot(lead) : null;
+      const stale = !currentSnapshot || Object.entries(request.changes).some(([field, change]) => (
+        JSON.stringify(canonical(currentSnapshot[field])) !== JSON.stringify(canonical(change.before))
+      ));
       if (stale) {
         const conflict = await client.query(`UPDATE lead_change_requests SET status = 'conflict', resolved_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`, [id]);
         await writeActivity(client, request.lead_id, user, 'system', `Lead change #${id} could not be applied because the lead changed during review. Submit a new request.`, { event: 'lead_change_conflict', request_id: request.id });
@@ -174,7 +177,9 @@ async function reviewLeadChange(id, decision, comments, user, dependencies = {})
         await client.query('COMMIT');
         return conflict.rows[0];
       }
-      await applyUpdate(request.lead_id, request.proposed_snapshot,
+      const approvedSnapshot = { ...currentSnapshot };
+      for (const [field, change] of Object.entries(request.changes)) approvedSnapshot[field] = change.after;
+      await applyUpdate(request.lead_id, approvedSnapshot,
         { id: request.requested_by_user_id, name: request.requested_by_name, role: 'sales_engineer' },
         { db: client, approvedChangeId: request.id });
       const detail = Object.entries(request.changes).map(([field, change]) => {

@@ -57,15 +57,15 @@ test('PostgreSQL: submission, Estimation Head approval, logs, notification targe
     const estimationHead = { id: 3, name: 'Estimation Head', role: 'estimation_head' };
     const original = (await client.query('SELECT *, enquiry_date::text AS enquiry_date FROM leads WHERE id = 7')).rows[0];
     await client.query('BEGIN');
-    const proposed = await updateLead(7, { ...original, project_name: 'Revised project', change_reviewers: { estimation_head_id: 3 } }, salesEngineer, { db });
+    const proposed = await updateLead(7, { ...original, priority: 'High', enquiry_product: 'Panel A', change_reviewers: { estimation_head_id: 3 } }, salesEngineer, { db });
     await client.query('COMMIT');
     assert.equal(proposed.approval_required, true);
-    assert.equal((await client.query('SELECT project_name FROM leads WHERE id = 7')).rows[0].project_name, 'Original project');
+    assert.deepEqual((await client.query('SELECT priority, enquiry_product FROM leads WHERE id = 7')).rows[0], { priority: 'High', enquiry_product: null });
     const requestId = proposed.change_request.id;
     await assert.rejects(reviewLeadChange(requestId, 'approve', '', salesHead, deps), { statusCode: 403 });
     const applied = await reviewLeadChange(requestId, 'approve', 'Estimation reviewed', estimationHead, deps);
     assert.equal(applied.status, 'applied');
-    assert.equal((await client.query('SELECT project_name FROM leads WHERE id = 7')).rows[0].project_name, 'Revised project');
+    assert.deepEqual((await client.query('SELECT priority, enquiry_product FROM leads WHERE id = 7')).rows[0], { priority: 'High', enquiry_product: 'Panel A' });
     // Only Admin and Sales Head can reassign; exercise both permitted paths.
     for (const [actor, ownerId] of [[{ id: 20, name: 'Admin', role: 'admin' }, 7], [salesHead, 1]]) {
       const latest = (await client.query('SELECT *, enquiry_date::text AS enquiry_date FROM leads WHERE id = 7')).rows[0];
@@ -83,11 +83,11 @@ test('PostgreSQL: submission, Estimation Head approval, logs, notification targe
 
     const current = (await client.query('SELECT *, enquiry_date::text AS enquiry_date FROM leads WHERE id = 7')).rows[0];
     await client.query('BEGIN');
-    const stale = await updateLead(7, { ...current, project_name: 'Next proposal', change_reviewers: { estimation_head_id: 3 } }, salesEngineer, { db });
+    const stale = await updateLead(7, { ...current, sales_approval_status: 'Vivid Approved', change_reviewers: { estimation_head_id: 3 } }, salesEngineer, { db });
     await client.query('COMMIT');
-    await client.query(`UPDATE leads SET priority = 'High' WHERE id = 7`);
+    await client.query(`UPDATE leads SET sales_approval_status = 'OEM Approved' WHERE id = 7`);
     assert.equal((await reviewLeadChange(stale.change_request.id, 'approve', '', estimationHead, deps)).status, 'conflict');
-    assert.equal((await client.query('SELECT project_name FROM leads WHERE id = 7')).rows[0].project_name, 'Revised project');
+    assert.equal((await client.query('SELECT sales_approval_status FROM leads WHERE id = 7')).rows[0].sales_approval_status, 'OEM Approved');
   } finally {
     await client.query('ROLLBACK').catch(() => {});
     client.release(true);

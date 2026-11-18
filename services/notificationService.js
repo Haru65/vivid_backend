@@ -75,6 +75,50 @@ async function notifyRole(role, data, db = pool) {
   }, data, db)));
 }
 
+async function notifyLeadClassificationChange({
+  leadId,
+  companyName,
+  projectName,
+  previousClassification,
+  nextClassification,
+  changedBy,
+}, db = pool) {
+  if (!leadId || previousClassification === nextClassification) return [];
+  const result = await db.query(
+    `SELECT DISTINCT u.id, u.first_name, u.last_name
+     FROM users u
+     WHERE u.is_active = TRUE
+       AND u.id <> $2
+       AND u.id IN (
+         SELECT NULLIF(to_jsonb(l)->>'sales_owner_id', '')::BIGINT FROM leads l WHERE l.id = $1
+         UNION
+         SELECT er.assigned_engineer_id FROM estimation_requests er
+           WHERE er.lead_id = $1 AND er.status NOT IN ('cancelled', 'discarded', 'dropped')
+         UNION
+         SELECT er.estimation_head_id FROM estimation_requests er
+           WHERE er.lead_id = $1 AND er.status NOT IN ('cancelled', 'discarded', 'dropped')
+       )`,
+    [leadId, changedBy?.id || 0],
+  );
+  const subject = projectName || companyName || `Lead #${leadId}`;
+  return Promise.all(result.rows.map((recipient) => createNotification({
+    id: recipient.id,
+    name: [recipient.first_name, recipient.last_name].filter(Boolean).join(' '),
+  }, {
+    title: 'Assigned lead classification changed',
+    body: `${changedBy?.name || 'A workspace user'} changed ${subject} from ${previousClassification || 'Unspecified'} to ${nextClassification || 'Unspecified'}.`,
+    category: 'lead',
+    link_type: 'lead',
+    link_id: leadId,
+    metadata: {
+      event: 'lead_classification_changed',
+      previous_classification: previousClassification || null,
+      next_classification: nextClassification || null,
+      changed_by_user_id: changedBy?.id || null,
+    },
+  }, db)));
+}
+
 async function listNotifications(user) {
   const result = await pool.query(
     `SELECT *
@@ -117,6 +161,7 @@ module.exports = {
   listNotifications,
   markAllNotificationsRead,
   markNotificationRead,
+  notifyLeadClassificationChange,
   notifyRole,
   notifyUserId,
 };

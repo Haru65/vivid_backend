@@ -17,6 +17,7 @@ const profileRouter = require('./routes/profileRoute');
 const { createSchemas } = require('./config/db_schema');
 const { authenticateToken, validateAuthConfiguration } = require('./middleware/auth');
 const { sendFridayTaskPlanningReminders, sendMondayTaskReviewReminders } = require('./services/taskReminderService');
+const { processLeadChangeDeadlines } = require('./services/leadChangeAutomationService');
 
 
 const dotenv = require('dotenv');
@@ -104,8 +105,12 @@ async function startServer() {
       sendFridayTaskPlanningReminders(),
       sendMondayTaskReviewReminders(),
     ]).catch((error) => console.error('Unable to send task planning reminders:', error));
+    const runLeadChangeDeadlines = () => processLeadChangeDeadlines()
+      .catch((error) => console.error('Unable to process lead change deadlines:', error));
     runTaskPlanningReminders();
+    runLeadChangeDeadlines();
     setInterval(runTaskPlanningReminders, 60 * 60 * 1000).unref();
+    setInterval(runLeadChangeDeadlines, 5 * 60 * 1000).unref();
     const server = app.listen(port, () => {
       console.log(`Server is running on http://localhost:${port}`);
     });

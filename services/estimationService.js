@@ -2,7 +2,7 @@
 const pool = require('../config/db_connection');
 const { createQuotation, createQuotationRevision, updateQuotation } = require('../controller/quotations');
 const { logLeadActivity } = require('../controller/leads');
-const { createNotification, notifyRole, notifyUserId } = require('./notificationService');
+const { createNotification, notifyLeadClassificationChange, notifyRole, notifyUserId } = require('./notificationService');
 const { getMasterSettings } = require('../controller/settings');
 const {
   PDFDocument,
@@ -309,6 +309,14 @@ async function updateEnquiryState(id, data, user) {
     activity_type: 'system',
     content: `Enquiry state changed from ${request.enquiry_state || 'Purchase'} to ${enquiryState}`,
   }, user);
+  await notifyLeadClassificationChange({
+    leadId: request.lead_id,
+    companyName: request.company_name,
+    projectName: request.project_name,
+    previousClassification: request.enquiry_state || 'Purchase',
+    nextClassification: enquiryState,
+    changedBy: user,
+  });
   return getRequest(id, user);
 }
 
