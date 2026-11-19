@@ -36,9 +36,12 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
 
   const actorIdText = String(query.actor_id || '').trim();
   const actorId = /^\d+$/.test(actorIdText) ? Number(actorIdText) : 0;
-  const teamDashboard = user.role === 'estimation_head'
+  const teamDashboard = ['admin', 'estimation_manager'].includes(user.role)
     && query.scope === 'team_dashboard'
     && actorId > 0;
+  const teamActivityRoles = user.role === 'estimation_manager'
+    ? ['sales_engineer', 'estimation_engineer']
+    : ['salesperson', 'sales_engineer', 'sales_head', 'presales', 'estimation_head', 'estimation_manager', 'estimation_engineer'];
 
   // The general Estimation Head log remains approval-only. The dashboard may
   // request the selected engineer's activity, but only for supported team roles.
@@ -46,8 +49,12 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
   if (approvalOnly) conditions.push(`a.activity_type IN ('approval_requested', 'approval')`);
   if (teamDashboard) {
     conditions.push(`a.actor_user_id = ${addValue(actorId)}`);
-    conditions.push(`u.role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_manager', 'estimation_engineer')`);
+    conditions.push(`u.role = ANY(${addValue(teamActivityRoles)}::text[])`);
   }
+
+  const leadIdText = String(query.lead_id || '').trim();
+  const leadId = /^\d+$/.test(leadIdText) ? Number(leadIdText) : 0;
+  if (leadId) conditions.push(`a.lead_id = ${addValue(leadId)}`);
 
   const search = String(query.q || '').trim().slice(0, 200);
   if (search) {
@@ -109,9 +116,9 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
   const metadataWhere = approvalOnly
     ? " WHERE activity_type IN ('approval_requested', 'approval')"
     : teamDashboard
-      ? " WHERE actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_manager', 'estimation_engineer'))"
+      ? ' WHERE actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role = ANY($2::text[]))'
       : '';
-  const metadataValues = teamDashboard ? [actorId] : [];
+  const metadataValues = teamDashboard ? [actorId, teamActivityRoles] : [];
   const [typesResult, actorsResult] = await Promise.all([
     db.query(`SELECT DISTINCT activity_type FROM lead_activities${metadataWhere} ORDER BY activity_type ASC`, metadataValues),
     db.query(`
@@ -119,7 +126,7 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
       FROM lead_activities
       WHERE NULLIF(TRIM(actor_name), '') IS NOT NULL
         ${approvalOnly ? "AND activity_type IN ('approval_requested', 'approval')" : ''}
-        ${teamDashboard ? "AND actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role IN ('salesperson', 'sales_engineer', 'presales', 'estimation_manager', 'estimation_engineer'))" : ''}
+        ${teamDashboard ? 'AND actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role = ANY($2::text[]))' : ''}
       GROUP BY actor_name
       ORDER BY actor_name ASC
     `, metadataValues),
