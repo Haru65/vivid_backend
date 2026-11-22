@@ -17,6 +17,7 @@ const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales', 'estimation_head', 'estimation_manager', 'estimation_engineer'));
+const quotationWriteAccess = requireRoles('admin', 'sales_engineer', 'salesperson', 'presales', 'estimation_head', 'estimation_manager', 'estimation_engineer');
 
 
 function currentUser(req) {
@@ -38,7 +39,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/create-quotation', async (req, res) => {
+router.post('/create-quotation', quotationWriteAccess, async (req, res) => {
   try {
     res.status(201).json(await createQuotation(req.body, currentUser(req)));
   } catch (error) {
@@ -46,7 +47,7 @@ router.post('/create-quotation', async (req, res) => {
   }
 });
 
-router.post('/:id/revisions', async (req, res) => {
+router.post('/:id/revisions', quotationWriteAccess, async (req, res) => {
   try {
     res.status(201).json(await createQuotationRevision(req.params.id, req.body, currentUser(req)));
   } catch (error) {
@@ -84,7 +85,7 @@ router.post('/:quotationId/negotiations/check', async (req, res) => {
   }
 });
 
-router.post('/:quotationId/negotiations', async (req, res) => {
+router.post('/:quotationId/negotiations', quotationWriteAccess, async (req, res) => {
   try {
     res.status(201).json(await createNegotiation(req.params.quotationId, req.body, currentUser(req)));
   } catch (error) {
@@ -92,7 +93,7 @@ router.post('/:quotationId/negotiations', async (req, res) => {
   }
 });
 
-router.put('/update-quotation/:id', async (req, res) => {
+router.put('/update-quotation/:id', quotationWriteAccess, async (req, res) => {
   try {
     const quotation = await updateQuotation(req.params.id, req.body, currentUser(req));
     if (!quotation) return res.status(404).json({ error: 'Draft quotation not found' });
@@ -102,7 +103,7 @@ router.put('/update-quotation/:id', async (req, res) => {
   }
 });
 
-router.delete('/delete-quotation/:id', async (req, res) => {
+router.delete('/delete-quotation/:id', quotationWriteAccess, async (req, res) => {
   try {
     const quotation = await deleteQuotation(req.params.id, currentUser(req));
     if (!quotation) return res.status(404).json({ error: 'Draft quotation not found' });
@@ -112,7 +113,7 @@ router.delete('/delete-quotation/:id', async (req, res) => {
   }
 });
 
-router.post('/send-quotation/:id', async (req, res) => {
+router.post('/send-quotation/:id', quotationWriteAccess, async (req, res) => {
   try {
     res.json(await sendQuotation(req.params.id, currentUser(req)));
   } catch (error) {

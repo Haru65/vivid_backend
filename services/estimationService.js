@@ -101,6 +101,7 @@ const SELECT_REQUEST = `
   l.contact_person_name,
   l.contact_person_email,
   l.contact_person_phone,
+  l.enquiry_notes AS enquiry_notes,
   l.billing_state,
   l.billing_city,
   l.billing_pincode,

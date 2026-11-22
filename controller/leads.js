@@ -1114,6 +1114,16 @@ async function updateLead(id, leadData, user, options = {}) {
         [lead.project_name, id],
       );
     }
+    if (changed(previous, lead, 'enquiry_notes')) {
+      await client.query(
+        `UPDATE estimation_requests
+         SET enquiry_notes = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE lead_id = $2
+           AND enquiry_notes IS DISTINCT FROM $1`,
+        [lead.enquiry_notes, id],
+      );
+    }
     if (ownTransaction) await client.query('COMMIT');
   } catch (error) {
     if (ownTransaction) await client.query('ROLLBACK').catch(() => {});

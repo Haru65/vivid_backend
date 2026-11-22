@@ -104,6 +104,17 @@ test('Estimation Manager has all-enquiry visibility and allotment without Head a
   assert.match(leadRouteSource, /router\.delete\('\/delete-lead\/:id', requireSalesRole/);
 });
 
+test('lead enquiry note updates stay synchronized with estimation', () => {
+  const leadSource = fs.readFileSync(path.join(__dirname, '../controller/leads.js'), 'utf8');
+  const estimationSource = fs.readFileSync(path.join(__dirname, '../services/estimationService.js'), 'utf8');
+
+  assert.match(
+    leadSource,
+    /SET enquiry_notes = \$1,[\s\S]*WHERE lead_id = \$2[\s\S]*enquiry_notes IS DISTINCT FROM \$1/,
+  );
+  assert.match(estimationSource, /l\.enquiry_notes AS enquiry_notes/);
+});
+
 test('production authentication requires an explicit JWT secret', () => {
   const previousEnvironment = process.env.NODE_ENV;
   const previousSecret = process.env.JWT_SECRET;

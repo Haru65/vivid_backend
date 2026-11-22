@@ -30,6 +30,7 @@ const { optionalUser, requireRoles } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(requireRoles('admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales', 'estimation_head', 'estimation_manager', 'estimation_engineer'));
+const salesQuotationWriteAccess = requireRoles('admin', 'sales_engineer', 'salesperson', 'presales');
 
 
 function currentUser(req) {
@@ -76,7 +77,7 @@ router.post('/from-lead/:leadId', async (req, res) => {
 });
 
 
-router.post('/:id/sales-revision', async (req, res) => {
+router.post('/:id/sales-revision', salesQuotationWriteAccess, async (req, res) => {
   try { res.json(await requestSalesRevision(req.params.id, req.body, currentUser(req))); }
   catch (error) { handleError(res, 'Unable to send quotation back for revision', error); }
 });
@@ -192,7 +193,7 @@ router.get('/:id/quotation-pdf', async (req, res) => {
   }
 });
 
-router.post('/:id/send-uploaded-quotation', async (req, res) => {
+router.post('/:id/send-uploaded-quotation', salesQuotationWriteAccess, async (req, res) => {
   try {
     res.json(await sendUploadedRequestQuotation(req.params.id, currentUser(req)));
   } catch (error) {
