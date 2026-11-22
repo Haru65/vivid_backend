@@ -17,6 +17,7 @@ const {
   requestRevision,
   reorderTeamPriorities,
   requestSalesRevision,
+  reviewSalesRevision,
   savePoEstimation,
   sendUploadedRequestQuotation,
   submitForReview,
@@ -78,6 +79,11 @@ router.post('/from-lead/:leadId', async (req, res) => {
 router.post('/:id/sales-revision', async (req, res) => {
   try { res.json(await requestSalesRevision(req.params.id, req.body, currentUser(req))); }
   catch (error) { handleError(res, 'Unable to send quotation back for revision', error); }
+});
+
+router.post('/:id/sales-revision/review', async (req, res) => {
+  try { res.json(await reviewSalesRevision(req.params.id, req.body, currentUser(req))); }
+  catch (error) { handleError(res, 'Unable to review sales revision', error); }
 });
 
 router.post('/:id/client-approved', async (req, res) => {

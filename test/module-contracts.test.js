@@ -93,7 +93,8 @@ test('Estimation Manager has all-enquiry visibility and allotment without Head a
 
   assert.equal(USER_ROLES.has('estimation_manager'), true);
   assert.deepEqual(managerWidgets, ['engineer_performance']);
-  assert.match(estimationSource, /\['admin', 'estimation_head', 'estimation_manager', 'sales_head', 'presales'\]\.includes\(user\?\.role\)/);
+  assert.match(estimationSource, /\['admin', 'estimation_head', 'estimation_manager', 'sales_head'\]\.includes\(user\?\.role\)/);
+  assert.match(estimationSource, /user\?\.role === 'presales'.+revision_requested_by_sales/);
   assert.match(estimationSource, /requireEstimationAllocator\(user\)/);
   assert.match(estimationSource, /\['admin', 'estimation_head', 'estimation_manager'\]\.includes\(user\?\.role\)/);
   assert.match(estimationSource, /function isEstimationHead\(user\) \{\s+return \['admin', 'estimation_head'\]\.includes\(user\?\.role\);\s+\}/);
@@ -130,11 +131,18 @@ test('sales forwards revision notes while estimation creates the revision quotat
     serviceSource.indexOf('async function createOrUpdateRequestQuotation'),
     serviceSource.indexOf('async function submitForReview'),
   );
+  const reviewFlow = serviceSource.slice(
+    serviceSource.indexOf('async function reviewSalesRevision'),
+    serviceSource.indexOf('async function markClientApproved'),
+  );
 
   assert.match(salesRevisionFlow, /status = 'revision_requested_by_sales'/);
   assert.match(salesRevisionFlow, /revision_notes = \$1/);
   assert.doesNotMatch(salesRevisionFlow, /createQuotationRevision\(/);
-  assert.match(estimationSaveFlow, /request\.status === 'revision_requested_by_sales'/);
+  assert.match(reviewFlow, /status = 'revision_requested'/);
+  assert.match(reviewFlow, /assigned_engineer_id = \$2/);
+  assert.match(reviewFlow, /status = 'sent_to_client'/);
+  assert.match(estimationSaveFlow, /request\.revision_requested_by === 'sales'/);
   assert.match(estimationSaveFlow, /createQuotationRevision\(request\.quotation_id/);
 });
 

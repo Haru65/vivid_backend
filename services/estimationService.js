@@ -162,14 +162,17 @@ function requestQuery(where = '', order = `ORDER BY CASE l.sales_approval_status
 }
 
 function canViewRequest(user, request) {
-  if (['admin', 'estimation_head', 'estimation_manager', 'sales_head', 'presales'].includes(user?.role)) return true;
+  if (['admin', 'estimation_head', 'estimation_manager', 'sales_head'].includes(user?.role)) return true;
+  if (user?.role === 'presales') return request.status !== 'revision_requested_by_sales';
   const assignedEstimator = ESTIMATION_CONTRIBUTOR_ROLES.has(user?.role)
     && String(request.assigned_engineer_id || '') === String(user.id || '');
   const ownsSalesRequest = INDIVIDUAL_SALES_ROLES.has(user?.role)
     && (request.sales_owner_name === user.name
       || request.requested_by_name === user.name
       || String(request.sales_owner_id || '') === String(user.id || ''));
-  if (ASSIGNED_ESTIMATION_ROLES.has(user?.role)) return assignedEstimator;
+  if (ASSIGNED_ESTIMATION_ROLES.has(user?.role)) {
+    return request.status !== 'revision_requested_by_sales' && assignedEstimator;
+  }
   if (INDIVIDUAL_SALES_ROLES.has(user?.role)) {
     return ownsSalesRequest;
   }
@@ -216,10 +219,12 @@ async function getRequest(id, user, client = pool) {
 async function listEstimationRequests(user) {
   await backfillUploadedQuotationNumbers();
   let result;
-  if (['admin', 'sales_head', 'estimation_head', 'estimation_manager', 'presales'].includes(user?.role)) {
+  if (['admin', 'sales_head', 'estimation_head', 'estimation_manager'].includes(user?.role)) {
     result = await pool.query(requestQuery());
+  } else if (user?.role === 'presales') {
+    result = await pool.query(requestQuery("WHERE er.status <> 'revision_requested_by_sales'"));
   } else if (ASSIGNED_ESTIMATION_ROLES.has(user?.role)) {
-    result = await pool.query(requestQuery('WHERE er.assigned_engineer_id = $1'), [user.id]);
+    result = await pool.query(requestQuery("WHERE er.assigned_engineer_id = $1 AND er.status <> 'revision_requested_by_sales'"), [user.id]);
   } else {
     result = await pool.query(requestQuery('WHERE er.requested_by_name = $1 OR er.sales_owner_name = $1 OR er.sales_owner_id = $2'), [actorName(user), user?.id || null]);
   }
@@ -444,7 +449,7 @@ async function assignRequest(id, data, user) {
            estimation_head_id = COALESCE(estimation_head_id, $3),
            estimation_head_name = COALESCE(estimation_head_name, $4),
            assignment_notes = $5,
-           status = 'assigned',
+           status = CASE WHEN status = 'revision_requested' THEN 'revision_requested' ELSE 'assigned' END,
            assigned_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $6
@@ -574,7 +579,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   if (ASSIGNED_ESTIMATION_ROLES.has(user.role) && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can upload this quotation.', 403);
   }
-  const allowedStatuses = new Set(['submitted', 'assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress']);
+  const allowedStatuses = new Set(['submitted', 'assigned', 'in_progress', 'revision_requested', 'revision_in_progress']);
   if (!allowedStatuses.has(request.status)) {
     throw appError('This estimation request is not ready for a quotation upload.', 409);
   }
@@ -589,7 +594,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   const filename = uploadedPdfFilename(metadata.filename);
   const quoteValue = uploadedQuoteValue(metadata.quote_value);
   const enteredQuotationNumber = uploadedQuotationNumber(metadata.quotation_number);
-  const isRevision = ['revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status);
+  const isRevision = ['revision_requested', 'revision_in_progress'].includes(request.status);
   const nextStatus = isEngineer
     ? (isRevision ? 'revision_submitted_for_review' : 'submitted_for_review')
     : (isRevision ? 'revision_in_progress' : 'in_progress');
@@ -606,7 +611,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
       [id],
     );
     let revisionNumber = Number(existingUpload.rows[0]?.revision_number || 0);
-    if (['revision_requested', 'revision_requested_by_sales'].includes(request.status)) {
+    if (request.status === 'revision_requested') {
       revisionNumber += 1;
     }
     await client.query(
@@ -726,12 +731,14 @@ async function createOrUpdateRequestQuotation(id, data, user) {
   if (ASSIGNED_ESTIMATION_ROLES.has(user.role) && String(request.assigned_engineer_id || '') !== String(user.id || '')) {
     throw appError('Only the assigned estimation engineer can prepare this quotation.', 403);
   }
-  if (!selfAssigningHead && !['assigned', 'in_progress', 'revision_requested', 'revision_requested_by_sales', 'revision_in_progress'].includes(request.status)) {
+  if (!selfAssigningHead && !['assigned', 'in_progress', 'revision_requested', 'revision_in_progress'].includes(request.status)) {
     throw appError('This estimation request is not ready for quotation preparation.');
   }
 
   const payload = { ...data, lead_id: request.lead_id };
-  const startingSalesRevision = request.status === 'revision_requested_by_sales' && Boolean(request.quotation_id);
+  const startingSalesRevision = request.status === 'revision_requested'
+    && request.revision_requested_by === 'sales'
+    && Boolean(request.quotation_id);
   let quotation;
   if (startingSalesRevision) {
     const revisionNotes = request.revision_notes;
@@ -755,7 +762,7 @@ async function createOrUpdateRequestQuotation(id, data, user) {
          estimation_head_id = CASE WHEN $5 THEN COALESCE(estimation_head_id, $2) ELSE estimation_head_id END,
          estimation_head_name = CASE WHEN $5 THEN COALESCE(estimation_head_name, $3) ELSE estimation_head_name END,
          assigned_at = CASE WHEN $5 THEN COALESCE(assigned_at, CURRENT_TIMESTAMP) ELSE assigned_at END,
-         status = CASE WHEN status IN ('revision_requested_by_sales', 'revision_in_progress') THEN 'revision_in_progress' ELSE 'in_progress' END,
+         status = CASE WHEN status IN ('revision_requested', 'revision_in_progress') THEN 'revision_in_progress' ELSE 'in_progress' END,
          engineer_started_at = COALESCE(engineer_started_at, CURRENT_TIMESTAMP),
          updated_at = CURRENT_TIMESTAMP
      WHERE id = $4
@@ -978,20 +985,103 @@ async function requestSalesRevision(id, data, user) {
     activity_type: 'system',
     content: `Sales requested quotation revision: ${notes}`,
   }, user);
-  if (request.assigned_engineer_id) await notifyUserId(request.assigned_engineer_id, {
-    title: 'Client revision requested',
+  const reviewNotification = {
+    title: 'Sales revision awaiting approval',
     body: notes,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,
-  });
-  if (request.estimation_head_id && String(request.estimation_head_id) !== String(request.assigned_engineer_id || '')) await notifyUserId(request.estimation_head_id, {
-    title: 'Sales sent quotation back for revision',
-    body: notes,
-    category: 'estimation',
-    link_type: 'estimation_request',
-    link_id: request.id,
-  });
+  };
+  if (request.estimation_head_id) await notifyUserId(request.estimation_head_id, reviewNotification);
+  else await notifyRole('estimation_head', reviewNotification);
+  await notifyRole('estimation_manager', reviewNotification);
+  return getRequest(id, user);
+}
+
+async function reviewSalesRevision(id, data, user) {
+  requireEstimationAllocator(user);
+  const decision = String(data?.decision || '').trim().toLowerCase();
+  if (!['approve', 'reject'].includes(decision)) throw appError('Revision decision must be approve or reject.');
+  const reviewNotes = text(data?.notes || data?.review_notes, decision === 'approve' ? 'Revision instructions' : 'Rejection reason', 2000, true);
+  const client = await pool.connect();
+  let request;
+  let engineerId = null;
+  let engineerName = null;
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT id FROM estimation_requests WHERE id = $1 FOR UPDATE', [id]);
+    request = await getRequest(id, user, client);
+    if (request.status !== 'revision_requested_by_sales') {
+      throw appError('This sales revision has already been reviewed.', 409);
+    }
+    if (decision === 'approve') {
+      engineerId = Number(data?.engineer_id || request.assigned_engineer_id);
+      if (!Number.isInteger(engineerId) || engineerId <= 0) throw appError('Select an estimation engineer for this revision.');
+      const engineer = await client.query(
+        `SELECT id, first_name, last_name FROM users
+         WHERE id = $1 AND is_active = TRUE AND role IN ('estimation_manager', 'estimation_engineer', 'presales')`,
+        [engineerId],
+      );
+      if (!engineer.rows[0]) throw appError('Select an active estimation manager, estimation engineer, or presales user.', 404);
+      engineerName = [engineer.rows[0].first_name, engineer.rows[0].last_name].filter(Boolean).join(' ');
+      await client.query(
+        `UPDATE estimation_requests
+         SET status = 'revision_requested',
+             assigned_engineer_id = $2,
+             assigned_engineer_name = $3,
+             assigned_at = CURRENT_TIMESTAMP,
+             review_notes = $4,
+             head_approved_at = CURRENT_TIMESTAMP,
+             estimation_head_id = CASE WHEN $5 THEN COALESCE(estimation_head_id, $6) ELSE estimation_head_id END,
+             estimation_head_name = CASE WHEN $5 THEN COALESCE(estimation_head_name, $7) ELSE estimation_head_name END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [id, engineerId, engineerName, reviewNotes, isEstimationHead(user), user?.id || null, actorName(user)],
+      );
+    } else {
+      await client.query(
+        `UPDATE estimation_requests
+         SET status = 'sent_to_client',
+             review_notes = $2,
+             head_approved_at = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [id, reviewNotes],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  await logLeadActivity(request.lead_id, {
+    activity_type: decision === 'approve' ? 'approval' : 'system',
+    content: decision === 'approve'
+      ? `${actorName(user)} approved the sales revision and assigned it to ${engineerName}. Instructions: ${reviewNotes}`
+      : `${actorName(user)} rejected the sales revision request: ${reviewNotes}`,
+  }, user);
+  if (decision === 'approve') {
+    await notifyUserId(engineerId, {
+      title: 'Quotation revision assigned',
+      body: `${actorName(user)} approved the revision for ${request.company_name || `lead #${request.lead_id}`} and assigned it to you. Sales note: ${request.revision_notes || 'Not provided'}. Instructions: ${reviewNotes}`,
+      category: 'estimation',
+      link_type: 'estimation_request',
+      link_id: request.id,
+    });
+  } else {
+    const salesNotification = {
+      title: 'Quotation revision rejected',
+      body: reviewNotes,
+      category: 'estimation',
+      link_type: 'estimation_request',
+      link_id: request.id,
+    };
+    if (request.requested_by_user_id) await notifyUserId(request.requested_by_user_id, salesNotification);
+    else await createNotification({ name: request.requested_by_name || request.sales_owner_name }, salesNotification);
+  }
   return getRequest(id, user);
 }
 
@@ -1723,6 +1813,7 @@ module.exports = {
   setEstimationWorkflowState,
   markClientApproved,
   requestSalesRevision,
+  reviewSalesRevision,
   approveRequest,
   assignRequest,
   createOrUpdateRequestQuotation,

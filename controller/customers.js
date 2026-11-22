@@ -48,15 +48,21 @@ function actorName(user) {
   return String(user?.name || '').trim();
 }
 
+function isCustomerManager(user) {
+  return ['admin', 'sales_head', 'presales'].includes(String(user?.role || '').trim().toLowerCase());
+}
+
 function isIndividualSales(user) {
-  return ['salesperson', 'sales_engineer', 'presales'].includes(String(user?.role || '').trim().toLowerCase());
+  return ['salesperson', 'sales_engineer'].includes(String(user?.role || '').trim().toLowerCase());
 }
 
 function canAccessOwnedCustomer(customer, user) {
-  if (!isIndividualSales(user)) return true;
-  return String(customer?.created_by_user_id || '') === String(user?.id || '')
-    || String(customer?.account_owner_user_id || '') === String(user?.id || '')
-    || customer?.owns_linked_lead === true
+  if (isCustomerManager(user)) return true;
+  if (!isIndividualSales(user)) return false;
+  if (customer?.account_owner_user_id) {
+    return String(customer.account_owner_user_id) === String(user?.id || '');
+  }
+  return customer?.owns_linked_lead === true
     || String(customer?.sales_owner_id || '') === String(user?.id || '')
     || String(customer?.assigned_to || '').trim() === actorName(user);
 }
@@ -78,7 +84,7 @@ async function customerForAccess(id, user) {
   const customer = result.rows[0];
   if (!customer) return null;
   if (!canAccessOwnedCustomer(customer, user)) {
-    const error = new Error('You can access only customers from leads assigned to you.');
+    const error = new Error('Only the assigned Sales Engineer, Sales Head, Presales, or Admin can modify this customer.');
     error.statusCode = 403;
     throw error;
   }
@@ -145,11 +151,11 @@ function nullableEmail(value, field) {
 }
 
 async function resolveAccountOwner(data, user, db, previous = null) {
-  const privileged = ['admin', 'sales_head'].includes(String(user?.role || '').toLowerCase());
+  const privileged = isCustomerManager(user);
   if (!privileged) {
     if (previous?.account_owner_user_id && data.account_owner_user_id
       && String(previous.account_owner_user_id) !== String(data.account_owner_user_id)) {
-      const error = new Error('Only Admin and Sales Head can change the account owner.');
+      const error = new Error('Only Admin, Sales Head, and Presales can change the account owner.');
       error.statusCode = 403;
       throw error;
     }
@@ -159,14 +165,17 @@ async function resolveAccountOwner(data, user, db, previous = null) {
   }
   const ownerId = Number(data.account_owner_user_id);
   if (!Number.isInteger(ownerId) || ownerId <= 0) throw validationError('Select an account owner.');
+  if (previous?.account_owner_user_id && String(previous.account_owner_user_id) === String(ownerId)) {
+    return { id: Number(previous.account_owner_user_id), name: previous.account_owner_name };
+  }
   const result = await db.query(
     `SELECT id, first_name, last_name
      FROM users
      WHERE id = $1 AND is_active = TRUE
-       AND role IN ('salesperson', 'sales_engineer', 'presales', 'sales_head')`,
+       AND role IN ('salesperson', 'sales_engineer')`,
     [ownerId],
   );
-  if (!result.rows[0]) throw validationError('Select an active salesperson, sales engineer, presales user, or Sales Head.');
+  if (!result.rows[0]) throw validationError('Select an active Sales Engineer.');
   return { id: Number(result.rows[0].id), name: [result.rows[0].first_name, result.rows[0].last_name].filter(Boolean).join(' ') };
 }
 
@@ -296,11 +305,22 @@ function customerValues(customerData) {
 async function retrieveCustomers(user) {
   await refreshAmcStatuses();
   const result = await pool.query(
-    `SELECT ${CUSTOMER_COLUMNS}
+    `SELECT ${CUSTOMER_COLUMNS},
+       EXISTS (
+         SELECT 1 FROM leads owned
+         WHERE owned.customer_id = c.id
+           AND (NULLIF(to_jsonb(owned)->>'sales_owner_id', '')::BIGINT = $1 OR LOWER(TRIM(owned.assigned_to)) = LOWER(TRIM($2)))
+       ) AS owns_linked_lead,
+       NULLIF((SELECT to_jsonb(source)->>'sales_owner_id' FROM leads source WHERE source.id = c.source_lead_id), '')::BIGINT AS sales_owner_id,
+       (SELECT source.assigned_to FROM leads source WHERE source.id = c.source_lead_id) AS assigned_to
      FROM customers c
      ORDER BY c.created_at DESC, c.id DESC`,
+    [user?.id || null, actorName(user)],
   );
-  return result.rows;
+  return result.rows.map((customer) => ({
+    ...customer,
+    can_modify: canAccessOwnedCustomer(customer, user),
+  }));
 }
 
 async function searchCustomers(query) {
@@ -485,13 +505,13 @@ async function createCustomer(customerData, user) {
 }
 
 async function updateCustomer(id, customerData, user) {
-  const existing = await pool.query('SELECT id, account_owner_user_id, account_owner_name FROM customers WHERE id = $1', [id]);
-  if (!existing.rows[0]) return null;
+  const existing = await customerForAccess(id, user);
+  if (!existing) return null;
   const values = customerValues(customerData);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const owner = await resolveAccountOwner(customerData, user, client, existing.rows[0]);
+    const owner = await resolveAccountOwner(customerData, user, client, existing);
     await assertUniqueCustomer(client, values[0], values[1], Number(id));
     const result = await client.query(
       `UPDATE customers
@@ -694,4 +714,9 @@ module.exports = {
   deleteCustomer,
   renewAmc,
   convertLeadToCustomer,
+  _permissions: {
+    isCustomerManager,
+    isIndividualSales,
+    canAccessOwnedCustomer,
+  },
 };

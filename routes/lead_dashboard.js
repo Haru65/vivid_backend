@@ -29,8 +29,9 @@ function currentUser(req) {
 }
 
 function handleActivityError(res, message, error) {
-  console.error(`${message}:`, error);
-  res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : message });
+  const status = error.statusCode || 500;
+  if (status >= 500) console.error(`${message}:`, error);
+  res.status(status).json({ error: error.statusCode ? error.message : message });
 }
 
 router.get('/', async (req, res) => {

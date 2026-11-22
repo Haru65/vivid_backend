@@ -1233,7 +1233,16 @@ async function deleteLead(id, user) {
     );
     const linked = dependencies.rows[0];
     if (Object.values(linked).some(Boolean)) {
-      throw Object.assign(new Error('This lead has quotation, estimation, meeting, or ERP history and cannot be deleted.'), { statusCode: 409 });
+      const linkedAreas = [
+        linked.has_quotations && 'quotations',
+        linked.has_estimation && 'estimation requests',
+        linked.has_meetings && 'meetings',
+        linked.has_handovers && 'ERP handovers',
+        linked.has_projects && 'projects',
+      ].filter(Boolean);
+      throw Object.assign(new Error(
+        `This lead cannot be deleted because it is still connected to ${linkedAreas.join(', ')}. These linked records are part of the sales or delivery pipeline and must be retained.`,
+      ), { statusCode: 409 });
     }
 
     await client.query(
