@@ -111,6 +111,7 @@ const SELECT_REQUEST = `
   l.enquiry_state,
   l.sales_approval_status,
   COALESCE(REGEXP_REPLACE(q.quotation_number, '-R[0-9]+$', '', 'i'), equ.quotation_number) AS quotation_number,
+  q.revision_number AS quotation_revision_number,
   q.status AS quotation_status,
   COALESCE(q.total_amount, equ.quote_value) AS quotation_total,
   q.technical_notes_data,

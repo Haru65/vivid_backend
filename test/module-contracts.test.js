@@ -115,6 +115,13 @@ test('lead enquiry note updates stay synchronized with estimation', () => {
   assert.match(estimationSource, /l\.enquiry_notes AS enquiry_notes/);
 });
 
+test('estimation requests expose enquiry-level revision history', () => {
+  const estimationSource = fs.readFileSync(path.join(__dirname, '../services/estimationService.js'), 'utf8');
+
+  assert.match(estimationSource, /q\.revision_number AS quotation_revision_number/);
+  assert.match(estimationSource, /equ\.revision_number AS uploaded_revision_number/);
+});
+
 test('production authentication requires an explicit JWT secret', () => {
   const previousEnvironment = process.env.NODE_ENV;
   const previousSecret = process.env.JWT_SECRET;
