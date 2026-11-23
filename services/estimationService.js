@@ -429,14 +429,33 @@ async function assignRequest(id, data, user) {
   const engineerId = Number(data.engineer_id);
   if (!Number.isInteger(engineerId) || engineerId <= 0) throw appError('Estimation engineer is required.');
   const notes = text(data.assignment_notes, 'Assignment notes', 2000);
+  const initiallyAssignableStatuses = new Set(['submitted', 'assigned', 'revision_requested']);
+  const replaceableStatuses = new Set([
+    'assigned',
+    'in_progress',
+    'submitted_for_review',
+    'revision_requested',
+    'revision_in_progress',
+    'revision_submitted_for_review',
+    'on_hold',
+  ]);
   const client = await pool.connect();
   let request;
   let engineerName;
+  let previousEngineerId;
+  let previousEngineerName;
+  let isReplacement = false;
   try {
     await client.query('BEGIN');
     request = await getRequest(id, user, client);
-    if (!['submitted', 'assigned', 'revision_requested'].includes(request.status)) {
-      throw appError('Only submitted or revision-requested estimation work can be assigned.');
+    previousEngineerId = request.assigned_engineer_id;
+    previousEngineerName = request.assigned_engineer_name;
+    isReplacement = Boolean(previousEngineerId) && String(previousEngineerId) !== String(engineerId);
+    if (String(previousEngineerId || '') === String(engineerId)) throw appError('Select a different estimation engineer.');
+    if (isReplacement ? !replaceableStatuses.has(request.status) : !initiallyAssignableStatuses.has(request.status)) {
+      throw appError(isReplacement
+        ? 'The estimation engineer can be replaced only while the enquiry is active.'
+        : 'Only submitted or revision-requested estimation work can be assigned.', 409);
     }
     const engineer = await client.query(
       `SELECT id, first_name, last_name FROM users
@@ -451,13 +470,14 @@ async function assignRequest(id, data, user) {
            assigned_engineer_name = $2,
            estimation_head_id = COALESCE(estimation_head_id, $3),
            estimation_head_name = COALESCE(estimation_head_name, $4),
-           assignment_notes = $5,
-           status = CASE WHEN status = 'revision_requested' THEN 'revision_requested' ELSE 'assigned' END,
+           assignment_notes = CASE WHEN $7 AND $5 IS NULL THEN assignment_notes ELSE $5 END,
+           status = CASE WHEN $7 THEN status WHEN status = 'revision_requested' THEN 'revision_requested' ELSE 'assigned' END,
+           estimation_priority_order = CASE WHEN $7 THEN NULL ELSE estimation_priority_order END,
            assigned_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $6
        RETURNING *`,
-      [engineerId, engineerName, isEstimationHead(user) ? user?.id || null : null, isEstimationHead(user) ? actorName(user) : null, notes, id],
+      [engineerId, engineerName, isEstimationHead(user) ? user?.id || null : null, isEstimationHead(user) ? actorName(user) : null, notes, id, isReplacement],
     );
     request = updated.rows[0];
     await client.query('COMMIT');
@@ -469,11 +489,31 @@ async function assignRequest(id, data, user) {
   }
   await logLeadActivity(request.lead_id, {
     activity_type: 'system',
-    content: `Estimation assigned to ${engineerName}`,
+    content: isReplacement
+      ? `Estimation engineer replaced: ${previousEngineerName || 'previous engineer'} → ${engineerName}${notes ? `. Note: ${notes}` : ''}`
+      : `Estimation assigned to ${engineerName}`,
+    metadata: {
+      event: isReplacement ? 'estimation_engineer_replaced' : 'estimation_assigned',
+      estimation_request_id: Number(id),
+      previous_engineer_id: previousEngineerId || null,
+      previous_engineer_name: previousEngineerName || null,
+      engineer_id: engineerId,
+      engineer_name: engineerName,
+      notes,
+    },
   }, user);
+  if (isReplacement && previousEngineerId) {
+    await notifyUserId(previousEngineerId, {
+      title: 'Estimation enquiry reassigned',
+      body: `${actorName(user)} reassigned ${request.company_name || `lead #${request.lead_id}`} to ${engineerName}.`,
+      category: 'estimation',
+      link_type: 'estimation_request',
+      link_id: request.id,
+    });
+  }
   await notifyUserId(engineerId, {
-    title: 'Estimation request assigned',
-    body: `${actorName(user)} assigned ${request.enquiry_product || 'an enquiry'} for ${request.company_name || `lead #${request.lead_id}`} to you.`,
+    title: isReplacement ? 'Estimation enquiry transferred to you' : 'Estimation request assigned',
+    body: `${actorName(user)} ${isReplacement ? 'transferred' : 'assigned'} ${request.enquiry_product || 'an enquiry'} for ${request.company_name || `lead #${request.lead_id}`} to you.`,
     category: 'estimation',
     link_type: 'estimation_request',
     link_id: request.id,
