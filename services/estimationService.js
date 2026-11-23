@@ -431,9 +431,11 @@ async function assignRequest(id, data, user) {
   const notes = text(data.assignment_notes, 'Assignment notes', 2000);
   const initiallyAssignableStatuses = new Set(['submitted', 'assigned', 'revision_requested']);
   const replaceableStatuses = new Set([
+    'submitted',
     'assigned',
     'in_progress',
     'submitted_for_review',
+    'revision_requested_by_sales',
     'revision_requested',
     'revision_in_progress',
     'revision_submitted_for_review',
@@ -470,9 +472,9 @@ async function assignRequest(id, data, user) {
            assigned_engineer_name = $2,
            estimation_head_id = COALESCE(estimation_head_id, $3),
            estimation_head_name = COALESCE(estimation_head_name, $4),
-           assignment_notes = CASE WHEN $7 AND $5 IS NULL THEN assignment_notes ELSE $5 END,
-           status = CASE WHEN $7 THEN status WHEN status = 'revision_requested' THEN 'revision_requested' ELSE 'assigned' END,
-           estimation_priority_order = CASE WHEN $7 THEN NULL ELSE estimation_priority_order END,
+           assignment_notes = CASE WHEN $7::boolean AND $5::text IS NULL THEN assignment_notes ELSE $5::text END,
+           status = CASE WHEN $7::boolean THEN status WHEN status = 'revision_requested' THEN 'revision_requested' ELSE 'assigned' END,
+           estimation_priority_order = CASE WHEN $7::boolean THEN NULL ELSE estimation_priority_order END,
            assigned_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $6

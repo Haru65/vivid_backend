@@ -33,8 +33,8 @@ function setup(role = 'estimation_head') {
       return { rows: values[0] === 9 ? [{ id: 9, first_name: 'New', last_name: 'Engineer' }] : [] };
     }
     if (/UPDATE estimation_requests/.test(sql) && /assigned_engineer_id/.test(sql)) {
-      assert.match(sql, /status = CASE WHEN \$7 THEN status/);
-      assert.match(sql, /estimation_priority_order = CASE WHEN \$7 THEN NULL/);
+      assert.match(sql, /status = CASE WHEN \$7::boolean THEN status/);
+      assert.match(sql, /estimation_priority_order = CASE WHEN \$7::boolean THEN NULL/);
       request = {
         ...request,
         assigned_engineer_id: values[0],
