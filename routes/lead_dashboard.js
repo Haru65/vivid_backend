@@ -21,7 +21,7 @@ const router = express.Router();
 const SALES_ROLES = ['admin', 'sales_head', 'sales_engineer', 'salesperson', 'presales'];
 const requireSalesRole = requireRoles(...SALES_ROLES);
 
-router.use(requireRoles(...SALES_ROLES, 'estimation_manager'));
+router.use(requireSalesRole);
 
 
 function currentUser(req) {

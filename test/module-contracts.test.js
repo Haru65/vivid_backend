@@ -98,7 +98,8 @@ test('Estimation Manager has all-enquiry visibility and allotment without Head a
   assert.match(estimationSource, /requireEstimationAllocator\(user\)/);
   assert.match(estimationSource, /\['admin', 'estimation_head', 'estimation_manager'\]\.includes\(user\?\.role\)/);
   assert.match(estimationSource, /function isEstimationHead\(user\) \{\s+return \['admin', 'estimation_head'\]\.includes\(user\?\.role\);\s+\}/);
-  assert.match(leadRouteSource, /router\.use\(requireRoles\(\.\.\.SALES_ROLES, 'estimation_manager'\)\)/);
+  assert.match(leadRouteSource, /router\.use\(requireSalesRole\)/);
+  assert.doesNotMatch(leadRouteSource, /router\.use\(requireRoles\(\.\.\.SALES_ROLES, 'estimation_manager'\)\)/);
   assert.match(leadRouteSource, /router\.post\('\/create-lead', requireSalesRole/);
   assert.match(leadRouteSource, /router\.put\('\/update-lead\/:id', requireSalesRole/);
   assert.match(leadRouteSource, /router\.delete\('\/delete-lead\/:id', requireSalesRole/);

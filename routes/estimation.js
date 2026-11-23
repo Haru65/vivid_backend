@@ -166,10 +166,17 @@ router.post('/:id/quotation', async (req, res) => {
 
 router.post('/:id/quotation-pdf', express.raw({ type: ['application/pdf', 'application/octet-stream'], limit: '15mb' }), async (req, res) => {
   try {
+    let remarks;
+    try {
+      remarks = decodeURIComponent(req.get('X-Quotation-Remarks') || '');
+    } catch {
+      return res.status(400).json({ error: 'Quotation remarks could not be read. Please re-enter them and try again.' });
+    }
     res.json(await uploadRequestQuotationPdf(req.params.id, req.body, {
       filename: req.get('X-File-Name'),
       quote_value: req.get('X-Quote-Value'),
       quotation_number: req.get('X-Quotation-Number'),
+      remarks,
     }, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to upload estimation quotation PDF', error);

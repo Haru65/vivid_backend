@@ -39,7 +39,7 @@ app.use((req, res, next) => {
 
   res.header(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-User-Name, X-User-Role, X-Quote-Value, X-Quotation-Number, X-File-Name'
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-User-Name, X-User-Role, X-Quote-Value, X-Quotation-Number, X-Quotation-Remarks, X-File-Name'
   );
 
   res.header(

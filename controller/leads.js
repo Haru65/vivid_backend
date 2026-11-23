@@ -1168,8 +1168,8 @@ async function updateLead(id, leadData, user, options = {}) {
 
 async function setLeadWorkflowState(id, data, user) {
   const action = String(data?.action || '').trim().toLowerCase();
-  if (!['hold', 'resume', 'drop'].includes(action)) throw validationError('Workflow action must be hold, resume, or drop.');
-  const reason = action === 'resume' ? null : text(data?.reason, `${action === 'hold' ? 'Hold' : 'Drop'} reason`, 2000, true);
+  if (!['hold', 'resume', 'drop', 'lost'].includes(action)) throw validationError('Workflow action must be hold, resume, drop, or lost.');
+  const reason = action === 'resume' ? null : text(data?.reason, `${action === 'lost' ? 'Loss' : action === 'hold' ? 'Hold' : 'Drop'} reason`, action === 'lost' ? 255 : 2000, true);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1178,7 +1178,15 @@ async function setLeadWorkflowState(id, data, user) {
     if (!lead) throw Object.assign(new Error('Lead not found.'), { statusCode: 404 });
     if (!canAccessLead(lead, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
 
-    if (action === 'hold') {
+    if (action === 'lost') {
+      await ensureLossReasonAllowed('Lost', reason);
+      await client.query(
+        `UPDATE leads SET lead_status = 'Lost', loss_reason = $2,
+           status_before_hold = NULL, hold_reason = NULL, held_at = NULL,
+           updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [id, reason],
+      );
+    } else if (action === 'hold') {
       if (lead.lead_status === 'On Hold') throw Object.assign(new Error('This lead is already on hold.'), { statusCode: 409 });
       if (['Dropped', 'Lost'].includes(lead.lead_status)) throw Object.assign(new Error('A dropped or lost lead cannot be put on hold.'), { statusCode: 409 });
       await client.query(
@@ -1214,7 +1222,8 @@ async function setLeadWorkflowState(id, data, user) {
       );
     }
 
-    const label = action === 'hold' ? `Lead put on hold. Reason: ${reason}`
+    const label = action === 'lost' ? `Lead marked as Closed Lost. Reason: ${reason}`
+      : action === 'hold' ? `Lead put on hold. Reason: ${reason}`
       : action === 'drop' ? `Lead dropped. Reason: ${reason}` : 'Lead resumed from hold.';
     await insertLeadActivity(id, { activity_type: 'system', content: label, metadata: { event: `lead_${action}`, reason } }, user, client);
     await client.query('COMMIT');

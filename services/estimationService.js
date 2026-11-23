@@ -123,6 +123,7 @@ const SELECT_REQUEST = `
   equ.mime_type AS uploaded_quote_mime_type,
   equ.file_size AS uploaded_quote_file_size,
   equ.quote_value AS uploaded_quote_value,
+  equ.remarks AS uploaded_quote_remarks,
   equ.uploaded_by_user_id AS uploaded_quote_by_user_id,
   equ.uploaded_by_name AS uploaded_quote_by_name,
   equ.uploaded_at AS uploaded_quote_at,
@@ -596,6 +597,7 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
   const filename = uploadedPdfFilename(metadata.filename);
   const quoteValue = uploadedQuoteValue(metadata.quote_value);
   const enteredQuotationNumber = uploadedQuotationNumber(metadata.quotation_number);
+  const remarks = text(metadata.remarks, 'Quotation remarks', 1000);
   const isRevision = ['revision_requested', 'revision_in_progress'].includes(request.status);
   const nextStatus = isEngineer
     ? (isRevision ? 'revision_submitted_for_review' : 'submitted_for_review')
@@ -619,8 +621,8 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
     await client.query(
       `INSERT INTO estimation_quote_uploads (
          estimation_request_id, quotation_number, revision_number, filename, mime_type, file_size, quote_value, pdf_data,
-         uploaded_by_user_id, uploaded_by_name, uploaded_at, updated_at
-       ) VALUES ($1, $2, $3, $4, 'application/pdf', $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         uploaded_by_user_id, uploaded_by_name, remarks, uploaded_at, updated_at
+       ) VALUES ($1, $2, $3, $4, 'application/pdf', $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
        ON CONFLICT (estimation_request_id) DO UPDATE
        SET quotation_number = EXCLUDED.quotation_number,
            revision_number = EXCLUDED.revision_number,
@@ -628,12 +630,13 @@ async function uploadRequestQuotationPdf(id, pdfData, metadata, user) {
            mime_type = EXCLUDED.mime_type,
            file_size = EXCLUDED.file_size,
            quote_value = EXCLUDED.quote_value,
+           remarks = EXCLUDED.remarks,
            pdf_data = EXCLUDED.pdf_data,
            uploaded_by_user_id = EXCLUDED.uploaded_by_user_id,
            uploaded_by_name = EXCLUDED.uploaded_by_name,
            uploaded_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP`,
-      [id, enteredQuotationNumber, revisionNumber, filename, pdf.length, quoteValue, pdf, user?.id || null, actorName(user)],
+      [id, enteredQuotationNumber, revisionNumber, filename, pdf.length, quoteValue, pdf, user?.id || null, actorName(user), remarks],
     );
     await client.query(
       `UPDATE estimation_requests

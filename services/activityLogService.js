@@ -23,6 +23,51 @@ function validDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
 }
 
+function activityError(message, statusCode = 403) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+const SALES_TEAM_ROLES = ['salesperson', 'sales_engineer', 'presales'];
+const DASHBOARD_MEMBER_ROLES = {
+  admin: [...SALES_TEAM_ROLES, 'sales_head', 'estimation_head', 'estimation_manager', 'estimation_engineer'],
+  sales_head: SALES_TEAM_ROLES,
+  estimation_head: [...SALES_TEAM_ROLES, 'estimation_manager', 'estimation_engineer'],
+  estimation_manager: [...SALES_TEAM_ROLES, 'estimation_engineer'],
+};
+
+async function authorizeTeamTrail(query, user, actorId, leadId, db) {
+  if (!actorId) throw activityError('Select an engineer to view activity.', 400);
+  const result = await db.query(
+    `SELECT id, role, TRIM(CONCAT_WS(' ', first_name, last_name)) AS name FROM users WHERE id = $1`,
+    [actorId],
+  );
+  const member = result.rows[0];
+  if (!member || !DASHBOARD_MEMBER_ROLES[user.role]?.includes(member.role)
+    || (user.role === 'estimation_manager' && String(user.id) === String(member.id))) {
+    throw activityError('You cannot view this team member’s activity.');
+  }
+  const team = query.team || (SALES_TEAM_ROLES.includes(member.role) || member.role === 'sales_head' ? 'sales' : 'estimation');
+  const teamRoles = team === 'sales' ? [...SALES_TEAM_ROLES, 'sales_head']
+    : team === 'estimation' ? ['estimation_head', 'estimation_manager', 'estimation_engineer', 'presales'] : [];
+  if (!teamRoles.includes(member.role)) throw activityError('This member does not belong to the selected team.');
+  if (!leadId) return;
+
+  const requests = await db.query('SELECT * FROM estimation_requests WHERE lead_id = $1', [leadId]);
+  const sameId = (value) => value != null && String(value) === String(member.id);
+  const sameName = (value) => Boolean(member.name?.trim())
+    && String(value || '').trim().toLowerCase() === member.name.trim().toLowerCase();
+  const belongsToMember = requests.rows.some((request) => {
+    if (team === 'estimation') {
+      const head = member.role === 'estimation_head';
+      const id = head ? request.estimation_head_id : request.assigned_engineer_id;
+      return id ? sameId(id) : sameName(head ? request.estimation_head_name : request.assigned_engineer_name);
+    }
+    return [request.sales_owner_id, request.requested_by_user_id, request.sales_head_id].some(sameId)
+      || [request.sales_owner_name, request.requested_by_name].some(sameName);
+  });
+  if (!belongsToMember) throw activityError('This project is not assigned to the selected team member.');
+}
+
 async function listActivityLogs(query = {}, user = {}, db = pool) {
   const page = positiveInteger(query.page, 1, 1000000);
   const limit = positiveInteger(query.limit, 50, 100);
@@ -35,25 +80,27 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
   };
 
   const actorIdText = String(query.actor_id || '').trim();
-  const actorId = /^\d+$/.test(actorIdText) ? Number(actorIdText) : 0;
-  const teamDashboard = ['admin', 'estimation_manager'].includes(user.role)
-    && query.scope === 'team_dashboard'
-    && actorId > 0;
-  const teamActivityRoles = user.role === 'estimation_manager'
-    ? ['sales_engineer', 'estimation_engineer']
-    : ['salesperson', 'sales_engineer', 'sales_head', 'presales', 'estimation_head', 'estimation_manager', 'estimation_engineer'];
+  const actorId = /^\d+$/.test(actorIdText) && Number.isSafeInteger(Number(actorIdText)) ? Number(actorIdText) : 0;
+  const leadIdText = String(query.lead_id || '').trim();
+  const leadId = /^\d+$/.test(leadIdText) && Number.isSafeInteger(Number(leadIdText)) ? Number(leadIdText) : 0;
+  const teamDashboard = query.scope === 'team_dashboard';
+  if (!DASHBOARD_MEMBER_ROLES[user.role]) throw activityError('You cannot view activity logs.');
+  if (user.role === 'estimation_manager' && !teamDashboard) {
+    throw activityError('Estimation Managers can view activity through the team dashboard only.');
+  }
+  if (teamDashboard) {
+    if (leadIdText && !leadId) throw activityError('Select a valid project.', 400);
+    await authorizeTeamTrail(query, user, actorId, leadId, db);
+  }
 
   // The general Estimation Head log remains approval-only. The dashboard may
   // request the selected engineer's activity, but only for supported team roles.
   const approvalOnly = user.role === 'estimation_head' && !teamDashboard;
   if (approvalOnly) conditions.push(`a.activity_type IN ('approval_requested', 'approval')`);
-  if (teamDashboard) {
+  if (teamDashboard && !leadId) {
     conditions.push(`a.actor_user_id = ${addValue(actorId)}`);
-    conditions.push(`u.role = ANY(${addValue(teamActivityRoles)}::text[])`);
   }
 
-  const leadIdText = String(query.lead_id || '').trim();
-  const leadId = /^\d+$/.test(leadIdText) ? Number(leadIdText) : 0;
   if (leadId) conditions.push(`a.lead_id = ${addValue(leadId)}`);
 
   const search = String(query.q || '').trim().slice(0, 200);
@@ -115,18 +162,21 @@ async function listActivityLogs(query = {}, user = {}, db = pool) {
 
   const metadataWhere = approvalOnly
     ? " WHERE activity_type IN ('approval_requested', 'approval')"
-    : teamDashboard
-      ? ' WHERE actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role = ANY($2::text[]))'
-      : '';
-  const metadataValues = teamDashboard ? [actorId, teamActivityRoles] : [];
+    : '';
+  const metadataValues = teamDashboard ? values : [];
   const [typesResult, actorsResult] = await Promise.all([
-    db.query(`SELECT DISTINCT activity_type FROM lead_activities${metadataWhere} ORDER BY activity_type ASC`, metadataValues),
-    db.query(`
+    db.query(teamDashboard
+      ? `SELECT DISTINCT a.activity_type ${baseFrom} ORDER BY a.activity_type ASC`
+      : `SELECT DISTINCT activity_type FROM lead_activities${metadataWhere} ORDER BY activity_type ASC`, metadataValues),
+    db.query(teamDashboard ? `
+      SELECT a.actor_name, MIN(a.actor_user_id) AS actor_user_id
+      ${baseFrom} AND NULLIF(TRIM(a.actor_name), '') IS NOT NULL
+      GROUP BY a.actor_name ORDER BY a.actor_name ASC
+    ` : `
       SELECT actor_name, MIN(actor_user_id) AS actor_user_id
       FROM lead_activities
       WHERE NULLIF(TRIM(actor_name), '') IS NOT NULL
         ${approvalOnly ? "AND activity_type IN ('approval_requested', 'approval')" : ''}
-        ${teamDashboard ? 'AND actor_user_id = $1 AND actor_user_id IN (SELECT id FROM users WHERE role = ANY($2::text[]))' : ''}
       GROUP BY actor_name
       ORDER BY actor_name ASC
     `, metadataValues),
