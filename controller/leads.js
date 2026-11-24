@@ -209,15 +209,15 @@ function canAccessLead(lead, user) {
 }
 
 async function resolveSalesOwner(data, user, db = pool) {
-  if (['salesperson', 'sales_engineer', 'presales'].includes(roleOf(user))) {
+  if (['salesperson', 'sales_engineer'].includes(roleOf(user))) {
     if ((data.sales_owner_id && String(data.sales_owner_id) !== String(user.id))
       || (data.assigned_to && String(data.assigned_to).trim() !== actorName(user))) {
-      throw Object.assign(new Error('Only Admin and Sales Head can assign a lead to another salesperson.'), { statusCode: 403 });
+      throw Object.assign(new Error('Only Admin, Sales Head, and Presales can assign a lead to another salesperson.'), { statusCode: 403 });
     }
     return { id: Number(user.id), name: actorName(user) };
   }
-  if (!['admin', 'sales_head'].includes(roleOf(user))) {
-    throw Object.assign(new Error('Only Sales Head or Admin can assign leads.'), { statusCode: 403 });
+  if (!['admin', 'sales_head', 'presales'].includes(roleOf(user))) {
+    throw Object.assign(new Error('Only Admin, Sales Head, or Presales can assign leads.'), { statusCode: 403 });
   }
   const ownerId = Number(data.sales_owner_id);
   if (!Number.isInteger(ownerId) || ownerId <= 0) throw validationError('Select a sales person to assign this lead.');
@@ -1026,12 +1026,12 @@ async function updateLead(id, leadData, user, options = {}) {
     }
     if (!canAccessLead(previous, user)) throw Object.assign(new Error('You can update only leads assigned to you.'), { statusCode: 403 });
 
-    if (['admin', 'sales_head'].includes(roleOf(user))) {
+    if (['admin', 'sales_head', 'presales'].includes(roleOf(user))) {
       owner = await resolveSalesOwner({ ...leadData, sales_owner_id: leadData.sales_owner_id || previous.sales_owner_id }, user, client);
     } else {
       if ((leadData.sales_owner_id && String(leadData.sales_owner_id) !== String(previous.sales_owner_id || ''))
         || (leadData.assigned_to !== undefined && String(leadData.assigned_to || '').trim() !== String(previous.assigned_to || '').trim())) {
-        throw Object.assign(new Error('Only Admin and Sales Head can change the assigned salesperson.'), { statusCode: 403 });
+        throw Object.assign(new Error('Only Admin, Sales Head, and Presales can change the assigned salesperson.'), { statusCode: 403 });
       }
       owner = { id: previous.sales_owner_id || null, name: previous.assigned_to };
     }

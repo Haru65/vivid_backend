@@ -201,7 +201,7 @@ test('request listings use authenticated role and user ID, with assigned enginee
   await assert.rejects(listLeadChanges({ id: 1, role: 'erp' }), { statusCode: 403 });
 });
 
-test('API lead updates reject forged salesperson reassignment before any customer or lead write', async () => {
+test('API lead updates reject forged salesperson reassignment from individual Sales users before any write', async () => {
   const pool = require('../config/db_connection');
   const { updateLead } = require('../controller/leads');
   const originalConnect = pool.connect;
@@ -215,7 +215,7 @@ test('API lead updates reject forged salesperson reassignment before any custome
     },
   });
   try {
-    for (const user of [engineer, { id: 5, name: 'Presales', role: 'presales' }, { ...engineer, role: 'salesperson' }, { ...engineer, id: 9 }]) {
+    for (const user of [engineer, { ...engineer, role: 'salesperson' }, { ...engineer, id: 9 }]) {
       await assert.rejects(updateLead(7, { sales_owner_id: 99, assigned_to: 'Other Person' }, user), { statusCode: 403 });
     }
     assert.equal(queries.some((sql) => /UPDATE leads|INSERT INTO/.test(sql)), false);
