@@ -394,53 +394,11 @@ async function assertUniqueCustomer(client, companyName, gstin, excludeId = null
 }
 
 async function quickCreateCustomer(customerData, user) {
-  const companyName = requiredString(customerData.company_name, 'Company name', 255);
-  const gstin = nullableGstin(customerData.gstin, 'GSTIN');
-  const contactName = requiredString(customerData.contact_person_name, 'Contact person name', 255);
-  const contactPhone = nullablePhone(customerData.contact_person_phone, 'Contact person phone');
-  const contactEmail = requiredString(customerData.contact_person_email, 'Contact person email', 255).toLowerCase();
-  if (!contactPhone) throw validationError('Contact person phone is required.');
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contactEmail)) {
-    throw validationError('Contact person email must be valid.');
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await assertUniqueCustomer(client, companyName, gstin);
-
-    const result = await client.query(
-      `INSERT INTO customers (
-        company_name, gstin, city, contact_person_name, contact_person_phone,
-        contact_person_email, amc_status, total_orders, lifetime_value, customer_since,
-        created_by_user_id, created_by_name, account_owner_user_id, account_owner_name
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'None', 0, 0, CURRENT_DATE, $7, $8, $9, $10)
-      RETURNING ${CUSTOMER_COLUMNS}`,
-      [
-        companyName,
-        gstin,
-        nullableString(customerData.city, 'City', 255),
-        contactName,
-        contactPhone,
-        contactEmail,
-        user?.id || null,
-        actorName(user) || null,
-        isIndividualSales(user) ? user?.id || null : null,
-        isIndividualSales(user) ? actorName(user) || null : null,
-      ],
-    );
-    await client.query('COMMIT');
-    return result.rows[0];
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
+  return insertCustomer(customerData, user, { allowIndividualSales: true });
 }
 
-async function createCustomer(customerData, user) {
-  if (isIndividualSales(user)) {
+async function insertCustomer(customerData, user, { allowIndividualSales = false } = {}) {
+  if (!allowIndividualSales && isIndividualSales(user)) {
     const error = new Error('Customer accounts for sales users are created from their assigned leads.');
     error.statusCode = 403;
     throw error;
@@ -502,6 +460,10 @@ async function createCustomer(customerData, user) {
   } finally {
     client.release();
   }
+}
+
+async function createCustomer(customerData, user) {
+  return insertCustomer(customerData, user);
 }
 
 async function updateCustomer(id, customerData, user) {
