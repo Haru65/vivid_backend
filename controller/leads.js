@@ -538,7 +538,19 @@ async function sentQuotationForLead(lead) {
      LIMIT 1`,
     params,
   );
-  return result.rows[0] || null;
+  if (result.rows[0]) return result.rows[0];
+
+  const uploaded = await pool.query(
+    `SELECT equ.id, equ.quotation_number, 'Sent'::varchar AS status
+     FROM estimation_requests er
+     JOIN estimation_quote_uploads equ ON equ.estimation_request_id = er.id
+     WHERE er.lead_id = $1
+       AND er.sent_to_client_at IS NOT NULL
+     ORDER BY er.sent_to_client_at DESC, er.id DESC
+     LIMIT 1`,
+    [lead.id],
+  );
+  return uploaded.rows[0] || null;
 }
 
 async function ensureLeadStatusAllowed(lead, nextStatus) {
