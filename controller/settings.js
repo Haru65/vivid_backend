@@ -174,7 +174,7 @@ function normalizeMasterSettings(data = {}) {
     if (key === 'quotation_price_points') return [key, normalizePricePoints(data[key], fallback)];
     if (key === 'technical_note_fields') return [key, normalizeTechnicalNoteFields(data[key], fallback)];
     if (key === 'dashboard_widgets') return [key, normalizeDashboardWidgets(data[key])];
-    if (key === 'product_categories') return [key, normalizeMasterList([...normalizeMasterList(data[key], fallback), ...DEAL_PRODUCTS], fallback)];
+    if (key === 'product_categories') return [key, normalizeMasterList(data[key], fallback)];
     return [key, normalizeMasterList(data[key], fallback)];
   }));
 }
@@ -211,15 +211,19 @@ async function updateTaxSettings(data, user) {
 }
 
 async function getMasterSettings() {
+  const defaults = normalizeMasterSettings(DEFAULT_MASTER_SETTINGS);
+  await pool.query(
+    `INSERT INTO system_settings (key, value, updated_at)
+     VALUES ('masters', $1::jsonb, CURRENT_TIMESTAMP)
+     ON CONFLICT (key) DO NOTHING`,
+    [JSON.stringify(defaults)],
+  );
   const result = await pool.query(
     `SELECT value
      FROM system_settings
      WHERE key = 'masters'`,
   );
-  return normalizeMasterSettings({
-    ...DEFAULT_MASTER_SETTINGS,
-    ...(result.rows[0]?.value || {}),
-  });
+  return normalizeMasterSettings(result.rows[0]?.value || defaults);
 }
 
 async function updateMasterSettings(data, user) {
