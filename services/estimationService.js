@@ -62,6 +62,12 @@ function requireEstimationAllocator(user) {
   }
 }
 
+function requireEstimationDeletion(user) {
+  if (!['estimation_head', 'estimation_manager'].includes(user?.role)) {
+    throw appError('Only the Estimation Head or Estimation Manager can delete an estimation.', 403);
+  }
+}
+
 function requireAdmin(user) {
   if (user?.role !== 'admin') throw appError('Only Admin can approve or decline a Frontsheet approval request.', 403);
 }
@@ -1258,6 +1264,98 @@ async function setEstimationWorkflowState(id, data, user) {
   return getRequest(id, user);
 }
 
+async function deleteEstimationRequest(id, user) {
+  requireEstimationDeletion(user);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `SELECT er.id, er.lead_id, er.quotation_id, er.status, l.company_name,
+              q.quotation_number
+       FROM estimation_requests er
+       JOIN leads l ON l.id = er.lead_id
+       LEFT JOIN quotations q ON q.id = er.quotation_id
+       WHERE er.id = $1
+       FOR UPDATE OF er`,
+      [id],
+    );
+    const request = result.rows[0];
+    if (!request) throw appError('Estimation request not found.', 404);
+    if (request.status !== 'dropped') {
+      throw appError('Drop the estimation before deleting it permanently.', 409);
+    }
+
+    const dependencies = await client.query(
+      `SELECT
+         EXISTS (SELECT 1 FROM po_closure_sheets WHERE estimation_request_id = $1) AS has_frontsheet,
+         EXISTS (
+           SELECT 1 FROM crm_erp_handovers
+           WHERE lead_id = $2 OR ($3::int IS NOT NULL AND quotation_id = $3)
+         ) AS has_handover,
+         EXISTS (
+           SELECT 1 FROM projects
+           WHERE lead_id = $2 OR ($3::int IS NOT NULL AND quotation_id = $3)
+         ) AS has_project,
+         EXISTS (
+           SELECT 1 FROM negotiations
+           WHERE $3::int IS NOT NULL AND quotation_id = $3
+         ) AS has_negotiation,
+         EXISTS (
+           SELECT 1 FROM estimation_requests
+           WHERE quotation_id = $3 AND id <> $1
+         ) AS quotation_shared`,
+      [id, request.lead_id, request.quotation_id],
+    );
+    const linked = dependencies.rows[0];
+    if (linked.has_frontsheet || linked.has_handover || linked.has_project) {
+      throw appError('This estimation cannot be deleted because it is already connected to a Frontsheet, ERP handover, or project.', 409);
+    }
+    if (linked.has_negotiation) {
+      throw appError('This estimation cannot be deleted because its quotation has negotiation history.', 409);
+    }
+    if (linked.quotation_shared) {
+      throw appError('This estimation cannot be deleted because its quotation is connected to another estimation request.', 409);
+    }
+
+    await logLeadActivity(request.lead_id, {
+      activity_type: 'system',
+      content: `Dropped estimation #${request.id} permanently deleted by ${actorName(user)}.`,
+      metadata: {
+        event: 'estimation_deleted',
+        estimation_request_id: Number(request.id),
+        quotation_id: request.quotation_id ? Number(request.quotation_id) : null,
+      },
+    }, user, client);
+    await client.query(
+      `DELETE FROM user_notifications
+       WHERE link_type = 'estimation_request' AND link_id = $1`,
+      [id],
+    );
+    await client.query('DELETE FROM estimation_quote_uploads WHERE estimation_request_id = $1', [id]);
+    await client.query('DELETE FROM estimation_requests WHERE id = $1', [id]);
+    if (request.quotation_id) {
+      await client.query('DELETE FROM quotations WHERE id = $1', [request.quotation_id]);
+      await client.query(
+        `UPDATE leads SET quotation = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND quotation = $2`,
+        [request.lead_id, request.quotation_number],
+      );
+    }
+    await client.query('COMMIT');
+    return {
+      id: Number(request.id),
+      lead_id: Number(request.lead_id),
+      quotation_id: request.quotation_id ? Number(request.quotation_id) : null,
+      deleted: true,
+    };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function upsertPoSheet(id, user, salesData = {}) {
   requireSales(user);
   const request = await getRequest(id, user);
@@ -1857,6 +1955,7 @@ module.exports = {
   savePoEstimation,
   upsertPoSheet,
   discardRequest,
+  deleteEstimationRequest,
   setEstimationWorkflowState,
   markClientApproved,
   requestSalesRevision,

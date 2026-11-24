@@ -6,6 +6,7 @@ const {
   approveRequest,
   assignRequest,
   createOrUpdateRequestQuotation,
+  deleteEstimationRequest,
   discardRequest,
   setEstimationWorkflowState,
   generatePoSheetPdf,
@@ -65,6 +66,14 @@ router.get('/:id', async (req, res) => {
     res.json(await getRequest(req.params.id, currentUser(req)));
   } catch (error) {
     handleError(res, 'Unable to retrieve estimation request', error);
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    res.json(await deleteEstimationRequest(req.params.id, currentUser(req)));
+  } catch (error) {
+    handleError(res, 'Unable to delete estimation', error);
   }
 });
 
