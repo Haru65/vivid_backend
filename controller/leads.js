@@ -1043,10 +1043,12 @@ async function updateLead(id, leadData, user, options = {}) {
     await ensureLossReasonAllowed(ownedLeadData.lead_status, ownedLeadData.loss_reason);
     let values = leadValues(ownedLeadData);
     await ensureUniqueProjectName(client, values[21], id);
-    await ensureLeadStatusAllowed({
-      ...previous,
-      quotation: values[12] || previous.quotation,
-    }, values[14]);
+    if (String(previous.lead_status || '') !== String(values[14] || '')) {
+      await ensureLeadStatusAllowed({
+        ...previous,
+        quotation: values[12] || previous.quotation,
+      }, values[14]);
+    }
     const protectedFieldsChanged = String(previous.enquiry_product || '') !== String(values[9] || '')
       || String(previous.sales_approval_status || '') !== String(values[19] || '');
     if (protectedFieldsChanged && await leadChangesRequireApproval(client, id, user, options)) {
