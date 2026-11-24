@@ -34,7 +34,7 @@ const TASK_COLUMNS = `
 
 const TASK_STATUSES = new Set(['todo', 'in_progress', 'completed', 'cancelled']);
 const TASK_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
-const TASK_MANAGER_ROLES = new Set(['admin', 'sales_head']);
+const TASK_MANAGER_ROLES = new Set(['admin', 'sales_head', 'presales']);
 const TASK_ASSIGNEE_ROLES = new Set(['sales_engineer', 'salesperson', 'presales']);
 
 function httpError(message, statusCode = 400) {

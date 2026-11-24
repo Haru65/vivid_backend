@@ -63,6 +63,17 @@ test('Sales Head assigns a new visit task and the engineer is notified', async (
   assert.match(calls.find((call) => /INSERT INTO visit_tasks/.test(call.sql)).sql, /assigned_to_user_id/);
 });
 
+test('Presales can assign a visit task to a specific Sales Engineer', async () => {
+  const { controller, notifications } = loadController();
+  const task = await controller.createTask(taskData, { id: 5, name: 'Presales Manager', role: 'presales' });
+
+  assert.equal(task.created_by_user_id, 5);
+  assert.equal(task.assigned_to_user_id, 9);
+  assert.equal(task.assigned_to_name, 'Sales Engineer');
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].userId, 9);
+});
+
 test('a Sales Engineer creating a task is always assigned to themselves', async () => {
   const { controller, calls, notifications } = loadController();
   const task = await controller.createTask(

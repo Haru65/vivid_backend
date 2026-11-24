@@ -479,7 +479,18 @@ async function assignRequest(id, data, user) {
            estimation_head_id = COALESCE(estimation_head_id, $3),
            estimation_head_name = COALESCE(estimation_head_name, $4),
            assignment_notes = CASE WHEN $7::boolean AND $5::text IS NULL THEN assignment_notes ELSE $5::text END,
-           status = CASE WHEN $7::boolean THEN status WHEN status = 'revision_requested' THEN 'revision_requested' ELSE 'assigned' END,
+           status = CASE
+             WHEN $7::boolean AND status = 'submitted_for_review' THEN 'in_progress'
+             WHEN $7::boolean AND status = 'revision_submitted_for_review' THEN 'revision_in_progress'
+             WHEN $7::boolean THEN status
+             WHEN status = 'revision_requested' THEN 'revision_requested'
+             ELSE 'assigned'
+           END,
+           status_before_hold = CASE
+             WHEN $7::boolean AND status = 'on_hold' AND status_before_hold = 'submitted_for_review' THEN 'in_progress'
+             WHEN $7::boolean AND status = 'on_hold' AND status_before_hold = 'revision_submitted_for_review' THEN 'revision_in_progress'
+             ELSE status_before_hold
+           END,
            estimation_priority_order = CASE WHEN $7::boolean THEN NULL ELSE estimation_priority_order END,
            assigned_at = CURRENT_TIMESTAMP,
            updated_at = CURRENT_TIMESTAMP
